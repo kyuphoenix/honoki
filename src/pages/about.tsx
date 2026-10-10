@@ -50,7 +50,8 @@ about.get('/', async (c) => {
   const pageDescription =
     aboutData.description || `关于本站 - 了解 ${siteConfig.title} 的技术架构、个人介绍与建站初衷`
 
-  setTieredCache(c, { tags: ['page', 'about'] })
+  // 关于页边缘缓存 30 分钟，SWR 24 小时
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['page', 'about'] })
 
   return c.html(
     <Layout

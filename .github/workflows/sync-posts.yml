@@ -120,7 +120,7 @@ jobs:
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
             echo "✅ 博客后端已成功清空旧数据缓存并重新缓存最新清单与友链！"
           else
-            echo "⚠️ 缓存刷新请求返回非 2xx 状态码: $HTTP_CODE (请核对 PURGE_SECRET 与服务端状态)"
+            echo "::warning::博客后端缓存刷新请求返回非 2xx 状态码: $HTTP_CODE (请核对 PURGE_SECRET 与服务端状态)"
           fi
 
       # ----------------------------------------------------
@@ -132,6 +132,7 @@ jobs:
           CF_ZONE_ID="${{ secrets.CLOUDFLARE_ZONE_ID || vars.CLOUDFLARE_ZONE_ID }}"
           CF_TOKEN="${{ secrets.CLOUDFLARE_API_TOKEN }}"
           BLOG_URL="${{ vars.BLOG_URL || secrets.BLOG_URL }}"
+          ACTION_TYPE="${{ env.ACTION_TYPE }}"
 
           # 自动清理首尾空格与可能误粘的 Bearer 前缀
           CF_ZONE_ID=$(echo "$CF_ZONE_ID" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
@@ -193,18 +194,59 @@ jobs:
               echo "✓ 自动发现并解析到 Cloudflare Zone ID: ${CF_ZONE_ID}"
               gh variable set CLOUDFLARE_ZONE_ID --body "$CF_ZONE_ID" 2>/dev/null || true
             else
-              echo "⚠️ 自动解析 Zone ID 失败（可能未配置 BLOG_URL，或 Token 未包含【Zone -> Zone -> Read】权限）。"
+              echo "::warning::自动解析 Zone ID 失败（可能未配置 BLOG_URL，或 Token 未包含【Zone -> Zone -> Read】权限）。"
               echo "💡 提示：请在 GitHub Secrets/Variables 中手动配置 CLOUDFLARE_ZONE_ID，或为 Token 追加【Zone -> Zone -> Read】权限。"
               exit 0
             fi
           fi
 
-          echo "正在请求 Cloudflare Control Plane 广播强制清空全球 CDN 边缘节点缓存 (Zone: ${CF_ZONE_ID})..."
+          # 构建清理 Payload：手动选 cdn 执行全量清空；常规更新执行精准 URL 清除（保护 /images/* 等长效缓存）
+          PAYLOAD='{"purge_everything":true}'
+          if [ "$ACTION_TYPE" != "cdn" ] && [ -n "$BLOG_URL" ]; then
+            TARGET_ORIGIN="${BLOG_URL%/}"
+            if [[ ! "$TARGET_ORIGIN" =~ ^https?:// ]]; then
+              TARGET_ORIGIN="https://${TARGET_ORIGIN}"
+            fi
+
+            FILES_JSON=$(TARGET_ORIGIN="$TARGET_ORIGIN" node -e '
+              const fs = require("fs");
+              const origin = process.env.TARGET_ORIGIN;
+              const urls = [
+                origin + "/",
+                origin + "/archive",
+                origin + "/links",
+                origin + "/about",
+                origin + "/sitemap.xml",
+                origin + "/rss.xml",
+                origin + "/atom.xml"
+              ];
+              if (fs.existsSync("posts/manifest.json")) {
+                try {
+                  const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
+                  const posts = Array.isArray(manifest) ? manifest : (manifest.posts || []);
+                  posts.slice(0, 10).forEach(p => {
+                    if (p.slug) urls.push(origin + "/posts/" + encodeURIComponent(p.slug));
+                  });
+                } catch {}
+              }
+              // Cloudflare API 单次 files 上限为 30 个 URL
+              console.log(JSON.stringify({ files: urls.slice(0, 30) }));
+            ' 2>/dev/null || true)
+
+            if [ -n "$FILES_JSON" ]; then
+              PAYLOAD="$FILES_JSON"
+              echo "🎯 本次采用受影响 URL 精准清除（保护 /images/* 静态图片长效缓存，共清理 $(echo "$FILES_JSON" | grep -o 'http' | wc -l) 个核心页面）"
+            fi
+          else
+            echo "🧹 本次采用全量清空 (purge_everything: true)"
+          fi
+
+          echo "正在请求 Cloudflare Control Plane 广播清除全球 CDN 边缘节点缓存 (Zone: ${CF_ZONE_ID})..."
           HTTP_CODE=$(curl -s -o /tmp/cf_purge.json -w "%{http_code}" -X POST \
             "https://api.cloudflare.com/client/v4/zones/${CF_ZONE_ID}/purge_cache" \
             -H "Authorization: Bearer ${CF_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data '{"purge_everything":true}')
+            --data "$PAYLOAD")
 
           echo "Cloudflare Purge HTTP 状态码: $HTTP_CODE"
           if [ -f /tmp/cf_purge.json ]; then
@@ -212,9 +254,9 @@ jobs:
           fi
 
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "✅ Cloudflare 全球 300+ 机房 CDN 缓存已全量清空！"
+            echo "✅ Cloudflare 全球 300+ 机房 CDN 缓存已成功清理！"
           else
-            echo "⚠️ Cloudflare CDN 清除未返回 2xx (HTTP $HTTP_CODE)"
+            echo "::warning::Cloudflare CDN 清除未返回 2xx (HTTP $HTTP_CODE)"
             if [ "$HTTP_CODE" -eq 401 ]; then
               echo "💡 提示 401 Authentication error 常见原因排查："
               echo "   1. CLOUDFLARE_ZONE_ID 是否误填为 Account ID？(请进入具体域名 kyuphoenix.com 页面右下角获取【区域 ID / Zone ID】)"
@@ -298,3 +340,56 @@ jobs:
             echo "ℹ️ 未配置 VERCEL_TOKEN / VERCEL_PROJECT_ID 或 VERCEL_DEPLOY_HOOK_URL，跳过 Vercel CDN 清理。"
             exit 0
           fi
+
+      # ----------------------------------------------------
+      # 3. 预热全球边缘 CDN 节点 (HTTP GET)
+      # ----------------------------------------------------
+      - name: Warm up edge cache with GET requests
+        if: ${{ env.ACTION_TYPE == 'all' || env.ACTION_TYPE == 'cdn' }}
+        run: |
+          BLOG_URL="${{ vars.BLOG_URL || secrets.BLOG_URL }}"
+          if [ -z "$BLOG_URL" ]; then
+            echo "ℹ️ 未配置 BLOG_URL，跳过边缘缓存预热。"
+            exit 0
+          fi
+
+          TARGET_ORIGIN="${BLOG_URL%/}"
+          if [[ ! "$TARGET_ORIGIN" =~ ^https?:// ]]; then
+            TARGET_ORIGIN="https://${TARGET_ORIGIN}"
+          fi
+
+          echo "🚀 开始预热核心页面边缘 CDN (HTTP GET)..."
+          
+          # 核心页面列表
+          PAGES=("/" "/archive" "/links" "/about" "/sitemap.xml")
+          
+          for path in "${PAGES[@]}"; do
+            URL="${TARGET_ORIGIN}${path}"
+            echo -n "预热 ${URL} ... "
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$URL" || echo "failed")
+            echo "状态码: $STATUS"
+          done
+
+          # 预热最新文章（从 manifest.json 读取前 3 篇）
+          if [ -f posts/manifest.json ]; then
+            node -e '
+              const fs = require("fs");
+              try {
+                const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
+                const posts = (Array.isArray(manifest) ? manifest : (manifest.posts || [])).slice(0, 3);
+                posts.forEach(p => {
+                  if (p.slug) console.log(p.slug);
+                });
+              } catch {}
+            ' | while read -r slug; do
+              if [ -n "$slug" ]; then
+                URL="${TARGET_ORIGIN}/posts/${slug}"
+                echo -n "预热文章 ${URL} ... "
+                STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$URL" || echo "failed")
+                echo "状态码: $STATUS"
+              fi
+            done
+          fi
+
+          echo "✅ 边缘缓存预热完成！"
+

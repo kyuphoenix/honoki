@@ -51,11 +51,11 @@ const CONFIG_CACHE_KEY = 'site_config'
 const ABOUT_CACHE_KEY = 'page:about'
 
 /**
- * 构建 GitHub Raw 内容 URL
+ * 构建 GitHub Raw 内容 URL (附加时间戳以绕过 Fastly/GitHub Raw 边缘 5 分钟死缓存)
  */
 function rawUrl(owner: string, repo: string, branch: string, path: string): string {
   const safeBranch = branch && branch.trim() ? branch.trim() : 'main'
-  return `https://raw.githubusercontent.com/${owner}/${repo}/${safeBranch}/${encodeURI(path)}`
+  return `https://raw.githubusercontent.com/${owner}/${repo}/${safeBranch}/${encodeURI(path)}?_t=${Date.now()}`
 }
 
 /**
@@ -92,6 +92,8 @@ async function fetchFromGitHub(
 ): Promise<string | null> {
   const headers: Record<string, string> = {
     'User-Agent': 'Blog-Worker',
+    'Cache-Control': 'no-cache, no-store',
+    Pragma: 'no-cache',
   }
   if (token) {
     headers['Authorization'] = `token ${token}`
@@ -133,12 +135,16 @@ export async function getManifest(env: AppEnv['Bindings']): Promise<Manifest> {
     if (localContent) {
       try {
         const manifest = JSON.parse(localContent) as Manifest
-        storage.setItem(MANIFEST_CACHE_KEY, manifest, { ttl: 3600 }).catch(() => {})
+        storage.setItem(MANIFEST_CACHE_KEY, manifest, { ttl: 3600 }).catch((err) => {
+          console.warn('[Cache] 写入本地 manifest 缓存异常:', err?.message || err)
+        })
         return manifest
       } catch {}
     }
     const builtin = getBuiltinManifest()
-    storage.setItem(MANIFEST_CACHE_KEY, builtin, { ttl: 3600 }).catch(() => {})
+    storage.setItem(MANIFEST_CACHE_KEY, builtin, { ttl: 3600 }).catch((err) => {
+      console.warn('[Cache] 写入内置 manifest 缓存异常:', err?.message || err)
+    })
     return builtin
   }
 
@@ -148,8 +154,8 @@ export async function getManifest(env: AppEnv['Bindings']): Promise<Manifest> {
     if (cached) {
       return cached
     }
-  } catch {
-    // 缓存不可用时忽略
+  } catch (err: any) {
+    console.warn('[Cache] 读取 manifest 缓存异常:', err?.message || err)
   }
 
   // 3. GitHub 未配置时返回示例数据
@@ -174,8 +180,8 @@ export async function getManifest(env: AppEnv['Bindings']): Promise<Manifest> {
       await storage.setItem(MANIFEST_CACHE_KEY, manifest, {
         ttl: getCacheTtl(env),
       })
-    } catch {
-      // 写入异常时忽略
+    } catch (err: any) {
+      console.warn('[Cache] 写入 manifest 缓存异常:', err?.message || err)
     }
 
     return manifest
@@ -209,8 +215,8 @@ export async function getPost(
     if (cached) {
       return cached
     }
-  } catch {
-    // 缓存不可用时忽略
+  } catch (err: any) {
+    console.warn(`[Cache] 读取文章 [${cacheKey}] 缓存异常:`, err?.message || err)
   }
 
   // 从清单查找对应文章以获取真实文件路径
@@ -251,7 +257,9 @@ export async function getPost(
         content,
       }
 
-      storage.setItem(cacheKey, post, { ttl: 3600 }).catch(() => {})
+      storage.setItem(cacheKey, post, { ttl: 3600 }).catch((err) => {
+        console.warn(`[Cache] 写入本地文章 [${cacheKey}] 缓存异常:`, err?.message || err)
+      })
       return post
     }
   }
@@ -298,8 +306,8 @@ export async function getPost(
     await storage.setItem(cacheKey, post, {
       ttl: getCacheTtl(env),
     })
-  } catch {
-    // 写入异常时忽略
+  } catch (err: any) {
+    console.warn(`[Cache] 写入文章 [${cacheKey}] 缓存异常:`, err?.message || err)
   }
 
   return post
@@ -339,8 +347,8 @@ export async function getFriends(env: AppEnv['Bindings']): Promise<FriendLink[]>
       if (Array.isArray(cached)) return cached
       if (cached && Array.isArray(cached.friends)) return cached.friends
     }
-  } catch {
-    // 缓存不可用时忽略
+  } catch (err: any) {
+    console.warn('[Cache] 读取 friends 缓存异常:', err?.message || err)
   }
 
   // 3. GitHub 未配置时返回内置示例数据
@@ -355,7 +363,9 @@ export async function getFriends(env: AppEnv['Bindings']): Promise<FriendLink[]>
 
   if (!content) {
     const builtin = getBuiltinFriends()
-    storage.setItem(FRIENDS_CACHE_KEY, builtin, { ttl: 60 }).catch(() => {})
+    storage.setItem(FRIENDS_CACHE_KEY, builtin, { ttl: 60 }).catch((err) => {
+      console.warn('[Cache] 写入 fallback friends 缓存异常:', err?.message || err)
+    })
     return builtin
   }
 
@@ -372,8 +382,8 @@ export async function getFriends(env: AppEnv['Bindings']): Promise<FriendLink[]>
       await storage.setItem(FRIENDS_CACHE_KEY, list, {
         ttl: getCacheTtl(env),
       })
-    } catch {
-      // 写入异常时忽略
+    } catch (err: any) {
+      console.warn('[Cache] 写入 friends 缓存异常:', err?.message || err)
     }
 
     return list
@@ -434,11 +444,15 @@ export async function getBlogConfig(env?: AppEnv['Bindings']): Promise<BlogConfi
             ...(parsed.seo || {}),
           },
         }
-        storage.setItem(CONFIG_CACHE_KEY, merged).catch(() => {})
+        storage.setItem(CONFIG_CACHE_KEY, merged).catch((err) => {
+          console.warn('[Cache] 写入本地 config 缓存异常:', err?.message || err)
+        })
         return merged
       } catch {}
     }
-    storage.setItem(CONFIG_CACHE_KEY, defaultBlogConfig).catch(() => {})
+    storage.setItem(CONFIG_CACHE_KEY, defaultBlogConfig).catch((err) => {
+      console.warn('[Cache] 写入默认 config 缓存异常:', err?.message || err)
+    })
     return defaultBlogConfig
   }
 
@@ -450,8 +464,8 @@ export async function getBlogConfig(env?: AppEnv['Bindings']): Promise<BlogConfi
     if (cached && typeof cached === 'object' && cached.title) {
       return cached
     }
-  } catch {
-    // 缓存不可用时忽略
+  } catch (err: any) {
+    console.warn('[Cache] 读取 config 缓存异常:', err?.message || err)
   }
 
   // 3. 如果 GitHub 未配置，返回本地默认配置
@@ -509,8 +523,8 @@ export async function getBlogConfig(env?: AppEnv['Bindings']): Promise<BlogConfi
         await storage.setItem(CONFIG_CACHE_KEY, merged, {
           ttl: getCacheTtl(env),
         })
-      } catch {
-        // 忽略写入缓存异常
+      } catch (err: any) {
+        console.warn('[Cache] 写入 config 缓存异常:', err?.message || err)
       }
 
       return merged
@@ -540,12 +554,16 @@ export async function getAboutContent(env?: AppEnv['Bindings']): Promise<AboutCo
           description: (parsed.frontmatter as any).description || undefined,
           content: parsed.content || localContent,
         }
-        storage.setItem(ABOUT_CACHE_KEY, aboutData, { ttl: 3600 }).catch(() => {})
+        storage.setItem(ABOUT_CACHE_KEY, aboutData, { ttl: 3600 }).catch((err) => {
+          console.warn('[Cache] 写入本地 about 缓存异常:', err?.message || err)
+        })
         return aboutData
       } catch {}
     }
     const builtin = getBuiltinAbout()
-    storage.setItem(ABOUT_CACHE_KEY, builtin, { ttl: 3600 }).catch(() => {})
+    storage.setItem(ABOUT_CACHE_KEY, builtin, { ttl: 3600 }).catch((err) => {
+      console.warn('[Cache] 写入内置 about 缓存异常:', err?.message || err)
+    })
     return builtin
   }
 
@@ -555,8 +573,8 @@ export async function getAboutContent(env?: AppEnv['Bindings']): Promise<AboutCo
     if (cached && typeof cached === 'object' && cached.content) {
       return cached
     }
-  } catch {
-    // 缓存不可用时忽略
+  } catch (err: any) {
+    console.warn('[Cache] 读取 about 缓存异常:', err?.message || err)
   }
 
   // 3. 如果 GitHub 未配置，返回内置默认关于内容
@@ -595,8 +613,8 @@ export async function getAboutContent(env?: AppEnv['Bindings']): Promise<AboutCo
         await storage.setItem(ABOUT_CACHE_KEY, aboutData, {
           ttl: getCacheTtl(env),
         })
-      } catch {
-        // 忽略写入缓存失败
+      } catch (err: any) {
+        console.warn('[Cache] 写入 about 缓存异常:', err?.message || err)
       }
 
       return aboutData
@@ -606,15 +624,24 @@ export async function getAboutContent(env?: AppEnv['Bindings']): Promise<AboutCo
   }
 
   const builtin = getBuiltinAbout()
-  storage.setItem(ABOUT_CACHE_KEY, builtin, { ttl: 60 }).catch(() => {})
+  storage.setItem(ABOUT_CACHE_KEY, builtin, { ttl: 60 }).catch((err) => {
+    console.warn('[Cache] 写入 fallback about 缓存异常:', err?.message || err)
+  })
   return builtin
+}
+
+export interface PurgeCacheResult {
+  success: boolean
+  purgedKeysCount: number
+  error?: string
 }
 
 /**
  * 清除所有缓存（文章、友链、关于页或站点配置更新后调用）
  */
-export async function purgeCache(env: AppEnv['Bindings']): Promise<void> {
+export async function purgeCache(env: AppEnv['Bindings']): Promise<PurgeCacheResult> {
   const storage = getBlogStorage(env)
+  let count = 0
 
   try {
     // 清除 manifest、friends、site_config 与 about 缓存
@@ -624,14 +651,20 @@ export async function purgeCache(env: AppEnv['Bindings']): Promise<void> {
       storage.removeItem(CONFIG_CACHE_KEY),
       storage.removeItem(ABOUT_CACHE_KEY),
     ])
+    count += 4
 
     // 列出并清除所有文章缓存
     const postKeys = await storage.getKeys('post:')
-    if (postKeys.length > 0) {
+    if (postKeys && postKeys.length > 0) {
       await Promise.all(postKeys.map((key) => storage.removeItem(key)))
+      count += postKeys.length
     }
-  } catch (err) {
-    console.warn('清除缓存失败:', err)
+    console.log(`[Cache] 成功清除底层 KV/内存缓存键共 ${count} 个`)
+    return { success: true, purgedKeysCount: count }
+  } catch (err: any) {
+    const msg = err?.message || String(err)
+    console.warn('[Cache] 清除底层缓存异常:', msg)
+    return { success: false, purgedKeysCount: count, error: msg }
   }
 }
 

@@ -13,11 +13,10 @@ export type DeployPlatform = 'cloudflare' | 'netlify' | 'vercel' | 'generic'
 /**
  * 智能探测当前代码运行的宿主平台 (Cloudflare Workers / Netlify / Vercel)
  *
- * 识别依据（多重兜底）：
- * 1. 环境变量 DEPLOY_PLATFORM (由各平台 GitHub Actions 部署脚本自动注入)
- * 2. 平台专属运行时环境变量 (VERCEL, NETLIFY)
- * 3. 平台专属请求头 (CF-Ray, x-vercel-id, x-nf-request-id)
- * 4. 平台专属全局运行时对象 (WebSocketPair / caches.default / Deno / Netlify)
+ * 识别依据：
+ * 1. 优先读取显式注入的环境变量 DEPLOY_PLATFORM (单一绝对事实源)
+ * 2. 检查各厂商特有的原生环境变量 (VERCEL, NETLIFY)
+ * 3. 运行时原生对象与默认回退 (默认 Cloudflare Workers)
  */
 export function detectPlatform(c?: Context): DeployPlatform {
   // 1. 优先读取显式注入的环境变量 (最精准)
@@ -47,22 +46,7 @@ export function detectPlatform(c?: Context): DeployPlatform {
     return 'netlify'
   }
 
-  // 4. 检查请求特征标头 (各边缘网关在转发至应用时均会携带唯一定位头)
-  if (c?.req) {
-    try {
-      if (c.req.header('cf-ray') || (c.req.raw as any)?.cf) {
-        return 'cloudflare'
-      }
-      if (c.req.header('x-vercel-id') || c.req.header('x-vercel-cache')) {
-        return 'vercel'
-      }
-      if (c.req.header('x-nf-request-id') || c.req.header('x-netlify-cache')) {
-        return 'netlify'
-      }
-    } catch {}
-  }
-
-  // 5. Cloudflare Workers 特有全局对象
+  // 4. Cloudflare Workers 特有全局对象或默认回退
   if (
     typeof (globalThis as any).WebSocketPair !== 'undefined' &&
     typeof (globalThis as any).caches !== 'undefined'
@@ -70,7 +54,7 @@ export function detectPlatform(c?: Context): DeployPlatform {
     return 'cloudflare'
   }
 
-  return 'generic'
+  return 'cloudflare'
 }
 
 /**
@@ -78,16 +62,16 @@ export function detectPlatform(c?: Context): DeployPlatform {
  *
  * 分层策略：
  * 1. 客户端浏览器 (Browser)：默认 max-age=0, must-revalidate
- *    - 确保用户刷新或前进/后退时总是向边缘 CDN 验证，CDN 缓存失效后用户能即时看到最新内容，避免被本地磁盘死缓存拦截。
+ *    - 确保用户刷新或导航时总是向边缘 CDN 验证，CDN 缓存失效后用户能即时看到最新内容，避免被本地磁盘死缓存拦截。
  * 2. 边缘 CDN (Edge CDN)：
- *    - s-maxage: 默认 86400 (24小时)，在 Vercel / Cloudflare / Netlify 边缘节点全球强缓存。
- *    - stale-while-revalidate (SWR): 默认 604800 (7天)，缓存过期后优先微秒级返回陈旧副本，同时后台异步静默从源站重新拉取。
+ *    - s-maxage: 支持由调用方传入差异化 TTL (聚合列表页 30 分钟，文章详情页 24 小时)。
+ *    - stale-while-revalidate (SWR): 聚合页 1 天，文章页 7 天。
  *    - 平台严格隔离：根据部署平台自动按需输出对应标头，Cloudflare 部署绝不输出 Netlify / Vercel 专属私有头。
  */
 export function setTieredCache(c: Context, options: CacheOptions = {}) {
   const browserMaxAge = options.browserMaxAge ?? 0
-  const edgeMaxAge = options.edgeMaxAge ?? 86400 // 24 小时
-  const swrMaxAge = options.swrMaxAge ?? 604800 // 7 天
+  const edgeMaxAge = options.edgeMaxAge ?? 86400 // 默认 24 小时
+  const swrMaxAge = options.swrMaxAge ?? 604800 // 默认 7 天
   const tags = options.tags || ['page']
 
   const platform = detectPlatform(c)
@@ -101,6 +85,7 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
   // 2. 根据部署运行的宿主平台，按需输出对应平台的专属边缘控制头与标签，彻底隔离其他平台的标头
   if (platform === 'cloudflare') {
     // Cloudflare 专属：优先级高于标准 Cache-Control，指示 CF 边缘节点强缓存与 SWR
+    // 注：Cloudflare 非企业版不支持通过 Cache-Tag 头清除，故仅输出边缘 TTL 控制头
     c.header(
       'Cloudflare-CDN-Cache-Control',
       `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
@@ -109,7 +94,6 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
       'CDN-Cache-Control',
       `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
     )
-    // 绝不输出 Netlify / Vercel 私有标头
   } else if (platform === 'netlify') {
     // Netlify 专属：Netlify 边缘节点 CDN 控制头与细粒度标签
     c.header(
@@ -129,7 +113,7 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
       c.header('Vercel-Cache-Tag', tags.join(','))
     }
   } else {
-    // 通用 / 本地环境：输出标准 RFC 9213 CDN-Cache-Control
+    // 通用环境：输出标准 RFC 9213 CDN-Cache-Control
     c.header(
       'CDN-Cache-Control',
       `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
@@ -149,116 +133,159 @@ export function setNoCache(c: Context) {
 export interface PurgePlatformResult {
   platform: 'cloudflare' | 'netlify' | 'vercel'
   success: boolean
+  skipped?: boolean
   message: string
+}
+
+export interface PurgePlatformOptions {
+  urls?: string[]
+  tags?: string[]
+  purgeEverything?: boolean
 }
 
 /**
  * 后端直接主动通知各厂商 CDN 清除边缘缓存 (通过厂商官方全局 Control Plane API)
+ * 支持精准 URL 清除（保护全站长效静态图片不被清空）与全量清除两种模式。
  */
 export async function purgePlatformCaches(
   env: AppEnv['Bindings'],
-  options?: { urls?: string[]; tags?: string[] }
+  options?: PurgePlatformOptions
 ): Promise<PurgePlatformResult[]> {
   const results: PurgePlatformResult[] = []
 
+  // ====================================================
   // 1. Cloudflare 全局 CDN 缓存清除
+  // ====================================================
   let cfZoneId = env?.CLOUDFLARE_ZONE_ID || (env as any)?.CF_ZONE_ID
   const cfToken = env?.CLOUDFLARE_API_TOKEN || (env as any)?.CF_API_TOKEN
 
-  // 若未显式配置 Zone ID 但有 Token，尝试自动通过 Cloudflare API 查询匹配 Zone ID
-  if (!cfZoneId && cfToken) {
-    try {
-      const blogUrl = env?.BLOG_URL
-      let targetHostname = ''
-      if (blogUrl) {
-        try {
-          targetHostname = new URL(
-            blogUrl.startsWith('http') ? blogUrl : `https://${blogUrl}`
-          ).hostname.toLowerCase()
-        } catch {}
-      }
-
-      const zonesRes = await fetch('https://api.cloudflare.com/client/v4/zones?per_page=50', {
-        headers: {
-          Authorization: `Bearer ${cfToken}`,
-          'Content-Type': 'application/json',
-        },
-      })
-      if (zonesRes.ok) {
-        const zonesData = (await zonesRes.json()) as any
-        const zones: Array<{ id: string; name: string }> = zonesData?.result || []
-        if (targetHostname) {
-          const matched = zones.find(
-            (z) => targetHostname === z.name.toLowerCase() || targetHostname.endsWith('.' + z.name.toLowerCase())
-          )
-          if (matched) cfZoneId = matched.id
+  if (!cfToken) {
+    results.push({
+      platform: 'cloudflare',
+      success: true,
+      skipped: true,
+      message: 'Cloudflare 清理跳过: 未配置 CLOUDFLARE_API_TOKEN',
+    })
+  } else {
+    // 若未显式配置 Zone ID 但有 Token，尝试自动通过 Cloudflare API 查询匹配 Zone ID
+    if (!cfZoneId) {
+      try {
+        const blogUrl = env?.BLOG_URL
+        let targetHostname = ''
+        if (blogUrl) {
+          try {
+            targetHostname = new URL(
+              blogUrl.startsWith('http') ? blogUrl : `https://${blogUrl}`
+            ).hostname.toLowerCase()
+          } catch {}
         }
-        if (!cfZoneId && zones.length === 1) {
-          cfZoneId = zones[0].id
-        }
-      }
-    } catch {}
-  }
 
-  if (cfZoneId && cfToken) {
-    try {
-      const payload: Record<string, any> = {}
-      if (options?.urls && options.urls.length > 0) {
-        payload.files = options.urls
-      } else {
-        payload.purge_everything = true
-      }
-
-      const res = await fetch(
-        `https://api.cloudflare.com/client/v4/zones/${cfZoneId}/purge_cache`,
-        {
-          method: 'POST',
+        const zonesRes = await fetch('https://api.cloudflare.com/client/v4/zones?per_page=50', {
           headers: {
             Authorization: `Bearer ${cfToken}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(payload),
+        })
+        if (zonesRes.ok) {
+          const zonesData = (await zonesRes.json()) as any
+          const zones: Array<{ id: string; name: string }> = zonesData?.result || []
+          if (targetHostname) {
+            const matched = zones.find(
+              (z) => targetHostname === z.name.toLowerCase() || targetHostname.endsWith('.' + z.name.toLowerCase())
+            )
+            if (matched) cfZoneId = matched.id
+          }
+          if (!cfZoneId && zones.length === 1) {
+            cfZoneId = zones[0].id
+          }
+        } else {
+          const errData = (await zonesRes.json().catch(() => ({}))) as any
+          const errMsg = errData?.errors?.[0]?.message || `HTTP ${zonesRes.status}`
+          console.warn(`[Cache] Cloudflare 自动查询 Zone ID 失败: ${errMsg}`)
         }
-      )
-      const data = (await res.json().catch(() => ({}))) as any
-      if (res.ok && data.success) {
-        results.push({
-          platform: 'cloudflare',
-          success: true,
-          message: payload.purge_everything
-            ? 'Cloudflare 全量缓存已成功清除'
-            : `Cloudflare ${options?.urls?.length} 个文件缓存已成功清除`,
-        })
-      } else {
-        const errorMsg = data?.errors?.[0]?.message || `HTTP ${res.status}`
-        results.push({
-          platform: 'cloudflare',
-          success: false,
-          message: `Cloudflare 清除失败: ${errorMsg}`,
-        })
+      } catch (err: any) {
+        console.warn(`[Cache] Cloudflare 查询 Zone ID 发生网络异常: ${err?.message || err}`)
       }
-    } catch (e: any) {
+    }
+
+    if (!cfZoneId) {
       results.push({
         platform: 'cloudflare',
         success: false,
-        message: `Cloudflare 异常: ${e?.message || e}`,
+        message: 'Cloudflare 清理失败: 无法解析 Zone ID，请在 GitHub Secrets/Variables 中配置 CLOUDFLARE_ZONE_ID',
       })
+    } else {
+      try {
+        const payload: Record<string, any> = {}
+        // 优先使用精准 URL 清理，保护 /images/* 静态图片不被误清空
+        if (!options?.purgeEverything && options?.urls && options.urls.length > 0) {
+          // Cloudflare 单次清除单文件最多支持 30 个 URL
+          payload.files = options.urls.slice(0, 30)
+        } else {
+          payload.purge_everything = true
+        }
+
+        const res = await fetch(
+          `https://api.cloudflare.com/client/v4/zones/${cfZoneId}/purge_cache`,
+          {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${cfToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+          }
+        )
+        const data = (await res.json().catch(() => ({}))) as any
+        if (res.ok && data.success) {
+          results.push({
+            platform: 'cloudflare',
+            success: true,
+            message: payload.purge_everything
+              ? 'Cloudflare 全量缓存已成功清除'
+              : `Cloudflare ${payload.files.length} 个页面缓存已精准清除`,
+          })
+        } else {
+          const errorMsg = data?.errors?.[0]?.message || `HTTP ${res.status}`
+          results.push({
+            platform: 'cloudflare',
+            success: false,
+            message: `Cloudflare 清除失败: ${errorMsg}`,
+          })
+        }
+      } catch (e: any) {
+        results.push({
+          platform: 'cloudflare',
+          success: false,
+          message: `Cloudflare 网络异常: ${e?.message || e}`,
+        })
+      }
     }
   }
 
+  // ====================================================
   // 2. Netlify 边缘 CDN 缓存清除
+  // ====================================================
   const netlifySiteId = env?.NETLIFY_SITE_ID || (env as any)?.NETLIFY_SITE_SLUG
   const netlifyToken =
     env?.NETLIFY_AUTH_TOKEN ||
     (env as any)?.NETLIFY_TOKEN ||
     (env as any)?.NETLIFY_PAT ||
     (env as any)?.NETLIFY_API_KEY
-  if (netlifySiteId && netlifyToken) {
+
+  if (!netlifySiteId || !netlifyToken) {
+    results.push({
+      platform: 'netlify',
+      success: true,
+      skipped: true,
+      message: 'Netlify 清理跳过: 未配置 NETLIFY_SITE_ID 或 NETLIFY_AUTH_TOKEN',
+    })
+  } else {
     try {
       const payload: Record<string, any> = {
         site_id: netlifySiteId,
       }
-      if (options?.tags && options.tags.length > 0) {
+      if (!options?.purgeEverything && options?.tags && options.tags.length > 0) {
         payload.cache_tags = options.tags
       }
 
@@ -274,8 +301,8 @@ export async function purgePlatformCaches(
         results.push({
           platform: 'netlify',
           success: true,
-          message: options?.tags
-            ? `Netlify 标签 [${options.tags.join(', ')}] 缓存已成功清除`
+          message: payload.cache_tags
+            ? `Netlify 标签 [${payload.cache_tags.join(', ')}] 缓存已成功清除`
             : 'Netlify 全站缓存已成功清除',
         })
       } else {
@@ -290,12 +317,14 @@ export async function purgePlatformCaches(
       results.push({
         platform: 'netlify',
         success: false,
-        message: `Netlify 异常: ${e?.message || e}`,
+        message: `Netlify 网络异常: ${e?.message || e}`,
       })
     }
   }
 
-  // 3. Vercel 边缘 CDN 缓存清除 (优先使用官方 Edge Cache REST API，无需绑定 GitHub 仓库与 Deploy Hook)
+  // ====================================================
+  // 3. Vercel 边缘 CDN 缓存清除
+  // ====================================================
   const vercelToken =
     env?.VERCEL_TOKEN ||
     (env as any)?.VERCEL_API_KEY ||
@@ -310,7 +339,7 @@ export async function purgePlatformCaches(
     try {
       const teamQuery = vercelOrgId ? `&teamId=${encodeURIComponent(vercelOrgId)}` : ''
       const targetTags =
-        options?.tags && options.tags.length > 0
+        !options?.purgeEverything && options?.tags && options.tags.length > 0
           ? options.tags
           : ['page', 'post', 'posts', 'home', 'archive', 'about', 'links', 'all-posts']
 
@@ -346,7 +375,7 @@ export async function purgePlatformCaches(
       results.push({
         platform: 'vercel',
         success: false,
-        message: `Vercel Edge Cache API 异常: ${e?.message || e}`,
+        message: `Vercel Edge Cache API 网络异常: ${e?.message || e}`,
       })
     }
   } else if (vercelHook) {
@@ -371,9 +400,16 @@ export async function purgePlatformCaches(
       results.push({
         platform: 'vercel',
         success: false,
-        message: `Vercel Deploy Hook 异常: ${e?.message || e}`,
+        message: `Vercel Deploy Hook 网络异常: ${e?.message || e}`,
       })
     }
+  } else {
+    results.push({
+      platform: 'vercel',
+      success: true,
+      skipped: true,
+      message: 'Vercel 清理跳过: 未配置 VERCEL_TOKEN 或 VERCEL_DEPLOY_HOOK_URL',
+    })
   }
 
   return results

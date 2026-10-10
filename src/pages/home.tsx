@@ -60,7 +60,8 @@ home.get('/', async (c) => {
     pageDescription = `${siteConfig.title} - 包含“#${tag}”标签的所有相关文章与教程（共 ${total} 篇）。`
   }
 
-  setTieredCache(c, { tags: ['page', 'home'] })
+  // 首页及分类/标签筛选属于聚合列表，边缘缓存 30 分钟，SWR 24 小时，避免旧文章残留
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['page', 'home'] })
 
   return c.html(
     <Layout

@@ -18,7 +18,8 @@ archive.get('/', async (c) => {
     .filter((p) => p.draft !== true && (p.draft as any) !== 'true')
     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
 
-  setTieredCache(c, { tags: ['page', 'archive'] })
+  // 归档页为高频汇总列表，边缘缓存 30 分钟，SWR 24 小时
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['page', 'archive'] })
 
   return c.html(
     <Layout

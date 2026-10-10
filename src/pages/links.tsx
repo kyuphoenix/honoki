@@ -41,7 +41,8 @@ ${i18n(I18nKey.siteAvatar, siteConfig.lang)}：${avatarUrl}`
     ? `mailto:${adminEmail}?subject=${mailtoSubject}&body=${mailtoBody}`
     : ''
 
-  setTieredCache(c, { tags: ['page', 'links'] })
+  // 友链聚合页边缘缓存 30 分钟，SWR 24 小时
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['page', 'links'] })
 
   return c.html(
     <Layout

@@ -3,12 +3,8 @@
   "main": "src/index.ts",
   "compatibility_date": "2024-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  // 开启 Cloudflare Workers 原生边缘 CDN 响应缓存
-  // 启用后，Cloudflare 全球 CDN 将位于 Worker 前端，依据 Cache-Control / Cloudflare-CDN-Cache-Control 自动强缓存
-  // 命中时由 CDN 毫秒级直接返回并携带 cf-cache-status: HIT 标头，不消耗 Worker CPU 时间
-  "cache": {
-    "enabled": true
-  },
+  // Cloudflare 边缘 CDN 缓存由响应头 (Cloudflare-CDN-Cache-Control / CDN-Cache-Control)
+  // 及自定义域名的 Cache Rules 驱动，Wrangler 配置本身无需 cache 顶层字段。
   // 静态资源目录（托管 /images/home-bg.webp, /images/avatar.webp, favicon 等）
   "assets": {
     "directory": "./public"

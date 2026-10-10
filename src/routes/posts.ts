@@ -136,8 +136,16 @@ posts.post('/purge', async (c) => {
     return fail(c, 'Unauthorized', 401)
   }
 
-  // 1. 清空旧文章及清单/友链/配置/关于页缓存
-  await purgeCache(c.env)
+  // 读取可选参数
+  let reqBody: any = null
+  try {
+    if (c.req.header('content-type')?.includes('application/json')) {
+      reqBody = await c.req.json().catch(() => null)
+    }
+  } catch {}
+
+  // 1. 严格原子操作：优先清空旧文章及清单/友链/配置/关于页底层缓存
+  const purgeResult = await purgeCache(c.env)
 
   // 2. 立即拉取并重新缓存最新文章列表、友链、配置与关于页
   const [manifest, friends, siteConfig, aboutData] = await Promise.all([
@@ -147,16 +155,55 @@ posts.post('/purge', async (c) => {
     getAboutContent(c.env),
   ])
 
-  // 3. 同时主动呼叫云厂商官方 CDN Control Plane 清除边缘缓存 (Cloudflare / Netlify / Vercel)
-  const platformPurges = await purgePlatformCaches(c.env)
+  // 3. 构建受影响页面的精准 URL 列表（保护全站长效静态图片 /images/* 不被清空）
+  const blogOrigin = c.env.BLOG_URL
+    ? (c.env.BLOG_URL.startsWith('http') ? c.env.BLOG_URL : `https://${c.env.BLOG_URL}`).replace(/\/$/, '')
+    : new URL(c.req.url).origin
+
+  const affectedUrls: string[] = [
+    `${blogOrigin}/`,
+    `${blogOrigin}/archive`,
+    `${blogOrigin}/links`,
+    `${blogOrigin}/about`,
+    `${blogOrigin}/sitemap.xml`,
+    `${blogOrigin}/rss.xml`,
+    `${blogOrigin}/atom.xml`,
+  ]
+
+  // 追加最新变动的文章详情页 URL（最多 10 篇）
+  if (Array.isArray(manifest)) {
+    for (const p of manifest.slice(0, 10)) {
+      if (p.title) {
+        affectedUrls.push(`${blogOrigin}/posts/${encodeURIComponent(p.title)}`)
+      }
+    }
+  }
+
+  // 如果请求传入了指定 urls，合并去重
+  if (reqBody?.urls && Array.isArray(reqBody.urls)) {
+    for (const u of reqBody.urls) {
+      if (typeof u === 'string' && !affectedUrls.includes(u)) {
+        affectedUrls.push(u)
+      }
+    }
+  }
+
+  // 4. 调用云厂商官方 CDN Control Plane 清除边缘缓存 (优先精准 URL，显式要求才全量)
+  const isPurgeEverything = reqBody?.purgeEverything === true
+  const platformPurges = await purgePlatformCaches(c.env, {
+    urls: affectedUrls,
+    purgeEverything: isPurgeEverything,
+  })
 
   return success(
     c,
     {
+      purgeResult,
       reCachedCount: manifest.length,
       reCachedFriendsCount: friends.length,
       siteTitle: siteConfig.title,
       aboutTitle: aboutData.title,
+      affectedUrlsCount: affectedUrls.length,
       platformPurges,
     },
     'Cache purged and manifest, friends, config & about re-cached successfully'

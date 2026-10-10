@@ -204,15 +204,6 @@ async function main() {
     }
   }
 
-  // 确保包含 Cloudflare Workers 原生边缘 CDN 响应缓存配置
-  if (!content.includes('"cache"')) {
-    content = content.replace(
-      /"compatibility_flags":\s*\[[^\]]*\],?/,
-      `"compatibility_flags": ["nodejs_compat"],\n  // 开启 Cloudflare Workers 原生边缘 CDN 响应缓存\n  "cache": {\n    "enabled": true\n  },`
-    )
-    console.log('✓ 已确保启用 Cloudflare Workers 原生边缘 CDN 响应缓存 (cache.enabled = true)')
-  }
-
   // 5. 动态注入非敏感运行期环境变量（仅注入有效配置项，未配置项自动忽略，彻底避免部署报错）
   const runtimeVars = {
     DEPLOY_PLATFORM: 'cloudflare',

@@ -180,7 +180,12 @@ postPage.get('/:title', async (c) => {
     '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-(--fuwari-primary) underline hover:opacity-80 transition">$1</a>'
   )
 
-  setTieredCache(c, { tags: ['page', 'post', `post-${encodeURIComponent(post.title)}`] })
+  // 文章详情内容极少变动，边缘长效强缓存 24 小时，SWR 7 天
+  setTieredCache(c, {
+    edgeMaxAge: 86400,
+    swrMaxAge: 604800,
+    tags: ['page', 'post', `post-${encodeURIComponent(post.title)}`],
+  })
 
   return c.html(
     <Layout
