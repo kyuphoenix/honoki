@@ -28,7 +28,9 @@ async function readLocalFile(relativePath: string): Promise<string | null> {
     if (fs.existsSync(fullPath)) {
       return fs.readFileSync(fullPath, 'utf-8')
     }
-  } catch {}
+  } catch (err: any) {
+    console.warn(`[LocalFS] 读取本地文件失败 (${relativePath}):`, err?.message || err)
+  }
   return null
 }
 
@@ -139,7 +141,9 @@ export async function getManifest(env: AppEnv['Bindings']): Promise<Manifest> {
           console.warn('[Cache] 写入本地 manifest 缓存异常:', err?.message || err)
         })
         return manifest
-      } catch {}
+      } catch (err: any) {
+        console.warn('[Cache] 解析本地 posts/manifest.json 异常:', err?.message || err)
+      }
     }
     const builtin = getBuiltinManifest()
     storage.setItem(MANIFEST_CACHE_KEY, builtin, { ttl: 3600 }).catch((err) => {
@@ -185,7 +189,8 @@ export async function getManifest(env: AppEnv['Bindings']): Promise<Manifest> {
     }
 
     return manifest
-  } catch {
+  } catch (err: any) {
+    console.warn('[Cache] 解析远程 posts/manifest.json 异常:', err?.message || err)
     return getBuiltinManifest()
   }
 }
@@ -202,8 +207,8 @@ export async function getPost(
   let decoded = identifier
   try {
     decoded = decodeURIComponent(identifier)
-  } catch {
-    // 忽略解码错误
+  } catch (err: any) {
+    console.warn(`[Router] URL 解码文章标识异常 (${identifier}):`, err?.message || err)
   }
 
   const cacheKey = `post:${decoded}`
@@ -331,12 +336,18 @@ export async function getFriends(env: AppEnv['Bindings']): Promise<FriendLink[]>
           : data && Array.isArray(data.friends)
           ? data.friends
           : []
-        storage.setItem(FRIENDS_CACHE_KEY, list, { ttl: 3600 }).catch(() => {})
+        storage.setItem(FRIENDS_CACHE_KEY, list, { ttl: 3600 }).catch((err) => {
+          console.warn('[Cache] 写入本地 friends 缓存异常:', err?.message || err)
+        })
         return list
-      } catch {}
+      } catch (err: any) {
+        console.warn('[Cache] 解析本地 friends.json 异常:', err?.message || err)
+      }
     }
     const builtin = getBuiltinFriends()
-    storage.setItem(FRIENDS_CACHE_KEY, builtin, { ttl: 3600 }).catch(() => {})
+    storage.setItem(FRIENDS_CACHE_KEY, builtin, { ttl: 3600 }).catch((err) => {
+      console.warn('[Cache] 写入内置 friends 缓存异常:', err?.message || err)
+    })
     return builtin
   }
 
@@ -448,7 +459,9 @@ export async function getBlogConfig(env?: AppEnv['Bindings']): Promise<BlogConfi
           console.warn('[Cache] 写入本地 config 缓存异常:', err?.message || err)
         })
         return merged
-      } catch {}
+      } catch (err: any) {
+        console.warn('[Cache] 解析本地 blog.config.json 异常:', err?.message || err)
+      }
     }
     storage.setItem(CONFIG_CACHE_KEY, defaultBlogConfig).catch((err) => {
       console.warn('[Cache] 写入默认 config 缓存异常:', err?.message || err)
@@ -558,7 +571,9 @@ export async function getAboutContent(env?: AppEnv['Bindings']): Promise<AboutCo
           console.warn('[Cache] 写入本地 about 缓存异常:', err?.message || err)
         })
         return aboutData
-      } catch {}
+      } catch (err: any) {
+        console.warn('[Cache] 解析本地 about.md 异常:', err?.message || err)
+      }
     }
     const builtin = getBuiltinAbout()
     storage.setItem(ABOUT_CACHE_KEY, builtin, { ttl: 3600 }).catch((err) => {
@@ -596,8 +611,8 @@ export async function getAboutContent(env?: AppEnv['Bindings']): Promise<AboutCo
         const parsed = parseFrontmatter(raw)
         frontmatter = parsed.frontmatter
         content = parsed.content
-      } catch {
-        // 没有 frontmatter 或格式不规范，作为纯 Markdown 处理
+      } catch (err: any) {
+        console.warn('[Cache] 解析远程 about.md frontmatter 异常，作为纯 Markdown 处理:', err?.message || err)
         frontmatter = {}
         content = raw
       }

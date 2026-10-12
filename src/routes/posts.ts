@@ -53,7 +53,7 @@ posts.get('/', async (c) => {
   const total = manifest.length
   const paged = isPaginated && pageSize > 0 ? manifest.slice(offset, offset + pageSize) : manifest
 
-  setTieredCache(c, { tags: ['api', 'posts'] })
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['api', 'posts'] })
   return paginated(c, paged, total, page, isPaginated ? pageSize : total)
 })
 
@@ -73,7 +73,7 @@ posts.get('/categories', async (c) => {
   const categories = Array.from(categoryMap, ([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count)
 
-  setTieredCache(c, { tags: ['api', 'categories'] })
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['api', 'categories'] })
   return success(c, categories)
 })
 
@@ -95,7 +95,7 @@ posts.get('/tags', async (c) => {
   const tags = Array.from(tagMap, ([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count)
 
-  setTieredCache(c, { tags: ['api', 'tags'] })
+  setTieredCache(c, { edgeMaxAge: 1800, swrMaxAge: 86400, tags: ['api', 'tags'] })
   return success(c, tags)
 })
 
@@ -118,7 +118,11 @@ posts.get('/:title', async (c) => {
     return fail(c, 'Post not found', 404)
   }
 
-  setTieredCache(c, { tags: ['api', 'post', `post-${encodeURIComponent(post.title)}`] })
+  setTieredCache(c, {
+    edgeMaxAge: 86400,
+    swrMaxAge: 604800,
+    tags: ['api', 'post', `post-${encodeURIComponent(post.title)}`],
+  })
   return success(c, post)
 })
 
@@ -142,7 +146,9 @@ posts.post('/purge', async (c) => {
     if (c.req.header('content-type')?.includes('application/json')) {
       reqBody = await c.req.json().catch(() => null)
     }
-  } catch {}
+  } catch (err: any) {
+    console.warn('[Purge] 解析请求 body 异常:', err?.message || err)
+  }
 
   // 1. 严格原子操作：优先清空旧文章及清单/友链/配置/关于页底层缓存
   const purgeResult = await purgeCache(c.env)

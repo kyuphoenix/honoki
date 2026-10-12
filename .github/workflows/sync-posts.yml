@@ -155,7 +155,9 @@ jobs:
                   try {
                     const u = new URL(blogUrl.startsWith("http") ? blogUrl : "https://" + blogUrl);
                     targetHost = u.hostname.toLowerCase();
-                  } catch {}
+                  } catch (e) {
+                    console.error("[Cache] BLOG_URL 格式解析失败:", e.message);
+                  }
                 }
                 try {
                   const res = await fetch("https://api.cloudflare.com/client/v4/zones?per_page=50", {
@@ -164,10 +166,18 @@ jobs:
                       "Content-Type": "application/json"
                     }
                   });
-                  if (!res.ok) process.exit(1);
+                  if (!res.ok) {
+                    const errData = await res.json().catch(() => ({}));
+                    const errMsg = (errData && errData.errors && errData.errors[0] && errData.errors[0].message) || ("HTTP " + res.status);
+                    console.error("[Cache] Cloudflare 自动查询 Zone 列表失败:", errMsg);
+                    process.exit(1);
+                  }
                   const data = await res.json();
                   const zones = data?.result || [];
-                  if (zones.length === 0) process.exit(1);
+                  if (zones.length === 0) {
+                    console.error("[Cache] 当前 Cloudflare 账号或 Token 权限范围内未查询到任何 Zone");
+                    process.exit(1);
+                  }
 
                   if (targetHost) {
                     const matched = zones.find(z => targetHost === z.name.toLowerCase() || targetHost.endsWith("." + z.name.toLowerCase()));
@@ -181,13 +191,15 @@ jobs:
                     console.log(zones[0].id);
                     process.exit(0);
                   }
-                } catch {
+                  console.error("[Cache] 存在多个 Zone 但未能与 BLOG_URL (" + (targetHost || "未设置") + ") 匹配");
+                } catch (e) {
+                  console.error("[Cache] Cloudflare 查询 Zone 发生网络异常:", e.message);
                   process.exit(1);
                 }
                 process.exit(1);
               }
               run();
-            ' 2>/dev/null || true)
+            ' || true)
 
             if [ -n "$AUTO_ZONE_ID" ]; then
               CF_ZONE_ID="$AUTO_ZONE_ID"
@@ -200,9 +212,18 @@ jobs:
             fi
           fi
 
-          # 构建清理 Payload：手动选 cdn 执行全量清空；常规更新执行精准 URL 清除（保护 /images/* 等长效缓存）
-          PAYLOAD='{"purge_everything":true}'
-          if [ "$ACTION_TYPE" != "cdn" ] && [ -n "$BLOG_URL" ]; then
+          # 构建清理 Payload：仅当显式选择 action_type: cdn 时执行全量清空；
+          # 常规文章同步 (all / push) 严格执行精准 URL 清除（绝不静默回退到 purge_everything，保护 /images/* 长效缓存）
+          PAYLOAD=""
+          if [ "$ACTION_TYPE" = "cdn" ]; then
+            PAYLOAD='{"purge_everything":true}'
+            echo "🧹 本次为显式全量清理模式 (action_type: cdn)，采用全站清空 (purge_everything: true)"
+          else
+            if [ -z "$BLOG_URL" ]; then
+              echo "::warning::未配置 BLOG_URL，无法构造受影响页面的完整 URL。为保护全站长效静态图片 (/images/*)，跳过本次 Cloudflare CDN 清理（如需全量清空请手动选择 action_type: cdn）。"
+              exit 0
+            fi
+
             TARGET_ORIGIN="${BLOG_URL%/}"
             if [[ ! "$TARGET_ORIGIN" =~ ^https?:// ]]; then
               TARGET_ORIGIN="https://${TARGET_ORIGIN}"
@@ -227,18 +248,21 @@ jobs:
                   posts.slice(0, 10).forEach(p => {
                     if (p.slug) urls.push(origin + "/posts/" + encodeURIComponent(p.slug));
                   });
-                } catch {}
+                } catch (e) {
+                  console.error("[Cache] 解析 posts/manifest.json 失败:", e.message);
+                }
               }
               // Cloudflare API 单次 files 上限为 30 个 URL
               console.log(JSON.stringify({ files: urls.slice(0, 30) }));
-            ' 2>/dev/null || true)
+            ' || true)
 
             if [ -n "$FILES_JSON" ]; then
               PAYLOAD="$FILES_JSON"
               echo "🎯 本次采用受影响 URL 精准清除（保护 /images/* 静态图片长效缓存，共清理 $(echo "$FILES_JSON" | grep -o 'http' | wc -l) 个核心页面）"
+            else
+              echo "::warning::构建受影响 URL 列表失败，为保护 /images/* 静态图片不被误清空，已中止本次 Cloudflare CDN 清理。"
+              exit 0
             fi
-          else
-            echo "🧹 本次采用全量清空 (purge_everything: true)"
           fi
 
           echo "正在请求 Cloudflare Control Plane 广播清除全球 CDN 边缘节点缓存 (Zone: ${CF_ZONE_ID})..."
@@ -378,9 +402,11 @@ jobs:
                 const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
                 const posts = (Array.isArray(manifest) ? manifest : (manifest.posts || [])).slice(0, 3);
                 posts.forEach(p => {
-                  if (p.slug) console.log(p.slug);
+                  if (p.slug) console.log(encodeURIComponent(p.slug));
                 });
-              } catch {}
+              } catch (e) {
+                console.error("[Cache] 预热阶段解析 posts/manifest.json 失败:", e.message);
+              }
             ' | while read -r slug; do
               if [ -n "$slug" ]; then
                 URL="${TARGET_ORIGIN}/posts/${slug}"

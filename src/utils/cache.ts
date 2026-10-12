@@ -8,7 +8,7 @@ export interface CacheOptions {
   tags?: string[]
 }
 
-export type DeployPlatform = 'cloudflare' | 'netlify' | 'vercel' | 'generic'
+export type DeployPlatform = 'cloudflare' | 'netlify' | 'vercel'
 
 /**
  * 智能探测当前代码运行的宿主平台 (Cloudflare Workers / Netlify / Vercel)
@@ -103,7 +103,7 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
     if (tags.length > 0) {
       c.header('Netlify-Cache-Tag', tags.join(','))
     }
-  } else if (platform === 'vercel') {
+  } else {
     // Vercel 专属：标准 CDN 标头与 Vercel Edge Cache 精准 Purge 标签
     c.header(
       'CDN-Cache-Control',
@@ -112,12 +112,6 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
     if (tags.length > 0) {
       c.header('Vercel-Cache-Tag', tags.join(','))
     }
-  } else {
-    // 通用环境：输出标准 RFC 9213 CDN-Cache-Control
-    c.header(
-      'CDN-Cache-Control',
-      `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
-    )
   }
 }
 
@@ -177,7 +171,9 @@ export async function purgePlatformCaches(
             targetHostname = new URL(
               blogUrl.startsWith('http') ? blogUrl : `https://${blogUrl}`
             ).hostname.toLowerCase()
-          } catch {}
+          } catch (err: any) {
+            console.warn(`[Cache] BLOG_URL 格式解析失败 (${blogUrl}):`, err?.message || err)
+          }
         }
 
         const zonesRes = await fetch('https://api.cloudflare.com/client/v4/zones?per_page=50', {
