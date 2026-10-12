@@ -246,7 +246,8 @@ jobs:
                   const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
                   const posts = Array.isArray(manifest) ? manifest : (manifest.posts || []);
                   posts.slice(0, 10).forEach(p => {
-                    if (p.slug) urls.push(origin + "/posts/" + encodeURIComponent(p.slug));
+                    const postKey = p.title || p.slug;
+                    if (postKey) urls.push(origin + "/posts/" + encodeURIComponent(postKey));
                   });
                 } catch (e) {
                   console.error("[Cache] 解析 posts/manifest.json 失败:", e.message);
@@ -305,8 +306,24 @@ jobs:
             NETLIFY_PAYLOAD="{\"site_id\":\"${NETLIFY_SITE_ID}\"}"
             echo "🧹 本次 Netlify 采用全站缓存清空 (action_type: cdn)..."
           else
-            NETLIFY_PAYLOAD="{\"site_id\":\"${NETLIFY_SITE_ID}\",\"cache_tags\":[\"page\",\"post\",\"posts\",\"home\",\"archive\",\"about\",\"links\",\"all-posts\"]}"
-            echo "🎯 本次 Netlify 采用按 Cache-Tag 标签精准软清理（保护静态媒体资源长效缓存）..."
+            NETLIFY_PAYLOAD=$(NETLIFY_SITE_ID="$NETLIFY_SITE_ID" node -e '
+              const fs = require("fs");
+              const tags = ["home", "archive", "links", "about", "rss", "sitemap", "posts", "categories", "tags"];
+              if (fs.existsSync("posts/manifest.json")) {
+                try {
+                  const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
+                  const posts = Array.isArray(manifest) ? manifest : (manifest.posts || []);
+                  posts.slice(0, 10).forEach(p => {
+                    const postKey = p.title || p.slug;
+                    if (postKey) tags.push("post-" + encodeURIComponent(postKey));
+                  });
+                } catch (e) {
+                  console.error("[Cache] Netlify 构建标签解析 posts/manifest.json 失败:", e.message);
+                }
+              }
+              console.log(JSON.stringify({ site_id: process.env.NETLIFY_SITE_ID, cache_tags: tags }));
+            ')
+            echo "🎯 本次 Netlify 采用按受影响页面与文章 Cache-Tag 标签精准软清理（保护静态媒体与未变动老文章缓存）..."
           fi
 
           HTTP_CODE=$(curl -s -o /tmp/netlify_purge.json -w "%{http_code}" -X POST \
@@ -333,6 +350,7 @@ jobs:
           VERCEL_PROJECT_ID="${{ secrets.VERCEL_PROJECT_ID || vars.VERCEL_PROJECT_ID || vars.VERCEL_PROJECT_NAME || 'honoki' }}"
           VERCEL_ORG_ID="${{ secrets.VERCEL_ORG_ID || vars.VERCEL_ORG_ID }}"
           VERCEL_HOOK="${{ secrets.VERCEL_DEPLOY_HOOK_URL || vars.VERCEL_DEPLOY_HOOK_URL }}"
+          ACTION_TYPE="${{ env.ACTION_TYPE }}"
 
           if [ -n "$VERCEL_TOKEN" ] && [ -n "$VERCEL_PROJECT_ID" ]; then
             echo "正在调用 Vercel 官方 Edge Cache REST API 按标签清理生产环境边缘 CDN 缓存..."
@@ -340,11 +358,36 @@ jobs:
             if [ -n "$VERCEL_ORG_ID" ]; then
               TEAM_QUERY="&teamId=${VERCEL_ORG_ID}"
             fi
+
+            if [ "$ACTION_TYPE" = "cdn" ]; then
+              VERCEL_PAYLOAD='{"tags":["page","post","api","rss","sitemap","robots","home","archive","links","about","posts","categories","tags"],"target":"production"}'
+              echo "🧹 本次 Vercel 采用全量标签清空 (action_type: cdn)..."
+            else
+              VERCEL_PAYLOAD=$(node -e '
+                const fs = require("fs");
+                const tags = ["home", "archive", "links", "about", "rss", "sitemap", "posts", "categories", "tags"];
+                if (fs.existsSync("posts/manifest.json")) {
+                  try {
+                    const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
+                    const posts = Array.isArray(manifest) ? manifest : (manifest.posts || []);
+                    posts.slice(0, 10).forEach(p => {
+                      const postKey = p.title || p.slug;
+                      if (postKey) tags.push("post-" + encodeURIComponent(postKey));
+                    });
+                  } catch (e) {
+                    console.error("[Cache] Vercel 构建标签解析 posts/manifest.json 失败:", e.message);
+                  }
+                }
+                console.log(JSON.stringify({ tags, target: "production" }));
+              ')
+              echo "🎯 本次 Vercel 采用按受影响页面与文章 Cache-Tag 标签精准软清理（保护静态媒体与未变动老文章缓存）..."
+            fi
+
             HTTP_CODE=$(curl -s -o /tmp/vercel_purge.json -w "%{http_code}" -X POST \
               "https://api.vercel.com/v1/edge-cache/dangerously-delete-by-tags?projectIdOrName=${VERCEL_PROJECT_ID}${TEAM_QUERY}" \
               -H "Authorization: Bearer ${VERCEL_TOKEN}" \
               -H "Content-Type: application/json" \
-              --data '{"tags":["page","post","posts","home","archive","about","links","all-posts"],"target":"production"}')
+              --data "$VERCEL_PAYLOAD")
 
             echo "Vercel Purge HTTP 状态码: $HTTP_CODE"
             if [ -f /tmp/vercel_purge.json ]; then
@@ -402,7 +445,7 @@ jobs:
             echo "状态码: $STATUS"
           done
 
-          # 预热最新文章（从 manifest.json 读取前 3 篇）
+          # 预热最新文章（从 manifest.json 读取前 3 篇，统一使用 title 对齐全站路由）
           if [ -f posts/manifest.json ]; then
             node -e '
               const fs = require("fs");
@@ -410,14 +453,15 @@ jobs:
                 const manifest = JSON.parse(fs.readFileSync("posts/manifest.json", "utf-8"));
                 const posts = (Array.isArray(manifest) ? manifest : (manifest.posts || [])).slice(0, 3);
                 posts.forEach(p => {
-                  if (p.slug) console.log(encodeURIComponent(p.slug));
+                  const postKey = p.title || p.slug;
+                  if (postKey) console.log(encodeURIComponent(postKey));
                 });
               } catch (e) {
                 console.error("[Cache] 预热阶段解析 posts/manifest.json 失败:", e.message);
               }
-            ' | while read -r slug; do
-              if [ -n "$slug" ]; then
-                URL="${TARGET_ORIGIN}/posts/${slug}"
+            ' | while read -r encoded_title; do
+              if [ -n "$encoded_title" ]; then
+                URL="${TARGET_ORIGIN}/posts/${encoded_title}"
                 echo -n "预热文章 ${URL} ... "
                 STATUS=$(curl -sS -o /dev/null -w "%{http_code}" "$URL" || echo "failed")
                 echo "状态码: $STATUS"

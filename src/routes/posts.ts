@@ -104,8 +104,7 @@ posts.get('/tags', async (c) => {
  * GET /api/posts/:title
  */
 posts.get('/:title', async (c) => {
-  const rawTitle = c.req.param('title')
-  const title = decodeURIComponent(rawTitle)
+  const title = c.req.param('title')
 
   const post = await getPost(title, c.env)
   if (!post) {
@@ -161,7 +160,7 @@ posts.post('/purge', async (c) => {
     getAboutContent(c.env),
   ])
 
-  // 3. 构建受影响页面的精准 URL 列表与 Cache-Tag 列表（保护全站长效静态图片 /images/* 不被清空）
+  // 3. 构建受影响页面的精准 URL 列表与 Cache-Tag 列表（保护全站长效静态图片 /images/* 及未变动老文章不被清空）
   const blogOrigin = c.env.BLOG_URL
     ? (c.env.BLOG_URL.startsWith('http') ? c.env.BLOG_URL : `https://${c.env.BLOG_URL}`).replace(/\/$/, '')
     : new URL(c.req.url).origin
@@ -176,14 +175,17 @@ posts.post('/purge', async (c) => {
     `${blogOrigin}/atom.xml`,
   ]
 
+  // 常规精准更新仅清理受影响的聚合页、订阅源、列表 API 标签及具体变动文章标签（不含宽泛伞状标签 'page' / 'post'）
   const affectedTags: string[] = [
-    'page',
     'home',
     'archive',
     'links',
     'about',
+    'rss',
+    'sitemap',
     'posts',
-    'all-posts',
+    'categories',
+    'tags',
   ]
 
   // 追加最新变动的文章详情页 URL 与标签（最多 10 篇）

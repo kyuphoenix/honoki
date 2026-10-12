@@ -138,8 +138,17 @@ export interface PurgePlatformOptions {
 }
 
 /**
+ * 生成带超时控制的 AbortSignal，防止厂商 CDN Control Plane API 挂起阻塞请求
+ */
+function createTimeoutSignal(timeoutMs = 5000): AbortSignal {
+  const controller = new AbortController()
+  setTimeout(() => controller.abort(new Error(`Request timed out after ${timeoutMs}ms`)), timeoutMs)
+  return controller.signal
+}
+
+/**
  * 后端直接主动通知各厂商 CDN 清除边缘缓存 (通过厂商官方全局 Control Plane API)
- * 支持精准 URL 清除（保护全站长效静态图片不被清空）与全量清除两种模式。
+ * 支持精准 URL/Tag 清除（保护全站长效静态图片与未变动老文章不被清空）与全量清除两种模式。
  */
 export async function purgePlatformCaches(
   env: AppEnv['Bindings'],
@@ -181,6 +190,7 @@ export async function purgePlatformCaches(
             Authorization: `Bearer ${cfToken}`,
             'Content-Type': 'application/json',
           },
+          signal: createTimeoutSignal(5000),
         })
         if (zonesRes.ok) {
           const zonesData = (await zonesRes.json()) as any
@@ -230,6 +240,7 @@ export async function purgePlatformCaches(
               'Content-Type': 'application/json',
             },
             body: JSON.stringify(payload),
+            signal: createTimeoutSignal(5000),
           }
         )
         const data = (await res.json().catch(() => ({}))) as any
@@ -292,6 +303,7 @@ export async function purgePlatformCaches(
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
+        signal: createTimeoutSignal(5000),
       })
       if (res.ok) {
         results.push({
@@ -334,10 +346,11 @@ export async function purgePlatformCaches(
   if (vercelToken && vercelProjectId) {
     try {
       const teamQuery = vercelOrgId ? `&teamId=${encodeURIComponent(vercelOrgId)}` : ''
+      // 常规更新使用传入的精准 tags；全量清理则清理全部伞状标签与功能标签
       const targetTags =
         !options?.purgeEverything && options?.tags && options.tags.length > 0
           ? options.tags
-          : ['page', 'post', 'posts', 'home', 'archive', 'about', 'links', 'all-posts']
+          : ['page', 'post', 'api', 'rss', 'sitemap', 'robots', 'home', 'archive', 'links', 'about', 'posts', 'categories', 'tags']
 
       const res = await fetch(
         `https://api.vercel.com/v1/edge-cache/dangerously-delete-by-tags?projectIdOrName=${encodeURIComponent(vercelProjectId)}${teamQuery}`,
@@ -351,6 +364,7 @@ export async function purgePlatformCaches(
             tags: targetTags,
             target: 'production',
           }),
+          signal: createTimeoutSignal(5000),
         }
       )
       if (res.ok) {
@@ -378,6 +392,7 @@ export async function purgePlatformCaches(
     try {
       const res = await fetch(vercelHook, {
         method: 'POST',
+        signal: createTimeoutSignal(5000),
       })
       if (res.ok) {
         results.push({

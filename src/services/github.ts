@@ -203,14 +203,29 @@ export async function getPost(
   identifier: string,
   env: AppEnv['Bindings']
 ): Promise<Post | null> {
-  // 解码可能传入的 URL 编码标题
-  let decoded = identifier
-  try {
-    decoded = decodeURIComponent(identifier)
-  } catch (err: any) {
-    console.warn(`[Router] URL 解码文章标识异常 (${identifier}):`, err?.message || err)
+  // Hono 路由层 c.req.param('title') 已完成一次 URL 解码；
+  // 仅当未命中直接匹配且含合法 %XX 序列时才尝试二次解码兜底，避免对含字面 '%'（如 "100%"）的标题误解码或抛异常
+  let fallbackDecoded = identifier
+  if (/%[0-9A-Fa-f]{2}/.test(identifier)) {
+    try {
+      fallbackDecoded = decodeURIComponent(identifier)
+    } catch {
+      // 含字面 '%' 无需解码
+    }
   }
 
+  // 从清单查找对应文章以获取规范标题与真实文件路径
+  const manifest = await getManifest(env)
+  const meta = manifest.find(
+    (p) =>
+      p.title === identifier ||
+      p.slug === identifier ||
+      p.title === fallbackDecoded ||
+      p.slug === fallbackDecoded ||
+      encodeURIComponent(p.title) === identifier
+  )
+
+  const decoded = meta ? meta.title : fallbackDecoded
   const cacheKey = `post:${decoded}`
   const storage = getBlogStorage(env)
 
@@ -223,17 +238,6 @@ export async function getPost(
   } catch (err: any) {
     console.warn(`[Cache] 读取文章 [${cacheKey}] 缓存异常:`, err?.message || err)
   }
-
-  // 从清单查找对应文章以获取真实文件路径
-  const manifest = await getManifest(env)
-  const meta = manifest.find(
-    (p) =>
-      p.title === decoded ||
-      p.title === identifier ||
-      p.slug === decoded ||
-      p.slug === identifier ||
-      encodeURIComponent(p.title) === identifier
-  )
 
   const isDev = isDevMode(env)
 

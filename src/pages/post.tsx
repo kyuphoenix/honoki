@@ -38,7 +38,7 @@ postPage.get('/', (c) => {
 postPage.get('/:title/', (c) => {
   const title = c.req.param('title')
   const url = new URL(c.req.url)
-  return c.redirect(`/posts/${encodeURIComponent(decodeURIComponent(title))}${url.search}`, 301)
+  return c.redirect(`/posts/${encodeURIComponent(title)}${url.search}`, 301)
 })
 
 interface TocItem {
@@ -48,8 +48,7 @@ interface TocItem {
 }
 
 postPage.get('/:title', async (c) => {
-  const rawTitle = c.req.param('title')
-  const title = decodeURIComponent(rawTitle)
+  const title = c.req.param('title')
   const [post, { categories, tags }, siteConfig] = await Promise.all([
     getPost(title, c.env),
     getSidebarData(c.env),
