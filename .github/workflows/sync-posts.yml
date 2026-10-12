@@ -322,7 +322,11 @@ jobs:
                 }
               }
               console.log(JSON.stringify({ site_id: process.env.NETLIFY_SITE_ID, cache_tags: tags }));
-            ')
+            ' || true)
+            if [ -z "$NETLIFY_PAYLOAD" ]; then
+              echo "::warning::构建 Netlify 受影响标签列表失败，已中止本次 Netlify CDN 清理。"
+              exit 0
+            fi
             echo "🎯 本次 Netlify 采用按受影响页面与文章 Cache-Tag 标签精准软清理（保护静态媒体与未变动老文章缓存）..."
           fi
 
@@ -379,7 +383,11 @@ jobs:
                   }
                 }
                 console.log(JSON.stringify({ tags, target: "production" }));
-              ')
+              ' || true)
+              if [ -z "$VERCEL_PAYLOAD" ]; then
+                echo "::warning::构建 Vercel 受影响标签列表失败，已中止本次 Vercel CDN 清理。"
+                exit 0
+              fi
               echo "🎯 本次 Vercel 采用按受影响页面与文章 Cache-Tag 标签精准软清理（保护静态媒体与未变动老文章缓存）..."
             fi
 
