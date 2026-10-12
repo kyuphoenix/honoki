@@ -294,18 +294,26 @@ jobs:
         run: |
           NETLIFY_SITE_ID="${{ secrets.NETLIFY_SITE_ID || vars.NETLIFY_SITE_ID || secrets.NETLIFY_PROJECT_ID || vars.NETLIFY_PROJECT_ID }}"
           NETLIFY_TOKEN="${{ secrets.NETLIFY_API_KEY || secrets.NETLIFY_AUTH_TOKEN || secrets.NETLIFY_TOKEN }}"
+          ACTION_TYPE="${{ env.ACTION_TYPE }}"
 
           if [ -z "$NETLIFY_SITE_ID" ] || [ -z "$NETLIFY_TOKEN" ]; then
             echo "ℹ️ 未配置 NETLIFY_SITE_ID (Project ID) 或 NETLIFY_API_KEY，跳过 Netlify CDN 清理。"
             exit 0
           fi
 
-          echo "正在请求 Netlify API 强制清空全球 CDN 边缘缓存..."
+          if [ "$ACTION_TYPE" = "cdn" ]; then
+            NETLIFY_PAYLOAD="{\"site_id\":\"${NETLIFY_SITE_ID}\"}"
+            echo "🧹 本次 Netlify 采用全站缓存清空 (action_type: cdn)..."
+          else
+            NETLIFY_PAYLOAD="{\"site_id\":\"${NETLIFY_SITE_ID}\",\"cache_tags\":[\"page\",\"post\",\"posts\",\"home\",\"archive\",\"about\",\"links\",\"all-posts\"]}"
+            echo "🎯 本次 Netlify 采用按 Cache-Tag 标签精准软清理（保护静态媒体资源长效缓存）..."
+          fi
+
           HTTP_CODE=$(curl -s -o /tmp/netlify_purge.json -w "%{http_code}" -X POST \
             "https://api.netlify.com/api/v1/purge" \
             -H "Authorization: Bearer ${NETLIFY_TOKEN}" \
             -H "Content-Type: application/json" \
-            --data "{\"site_id\":\"${NETLIFY_SITE_ID}\"}")
+            --data "$NETLIFY_PAYLOAD")
 
           echo "Netlify Purge HTTP 状态码: $HTTP_CODE"
           if [ -f /tmp/netlify_purge.json ]; then
@@ -313,9 +321,9 @@ jobs:
           fi
 
           if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-            echo "✅ Netlify 全球边缘 CDN 缓存已成功清空！"
+            echo "✅ Netlify 全球边缘 CDN 缓存已成功清理！"
           else
-            echo "⚠️ Netlify CDN 清除未返回 2xx (请检查 NETLIFY_SITE_ID 与 Token 是否有效)"
+            echo "::warning::Netlify CDN 清除未返回 2xx (HTTP $HTTP_CODE，请检查 NETLIFY_SITE_ID 与 Token 是否有效)"
           fi
 
       - name: Force Purge Vercel CDN Cache
@@ -327,7 +335,7 @@ jobs:
           VERCEL_HOOK="${{ secrets.VERCEL_DEPLOY_HOOK_URL || vars.VERCEL_DEPLOY_HOOK_URL }}"
 
           if [ -n "$VERCEL_TOKEN" ] && [ -n "$VERCEL_PROJECT_ID" ]; then
-            echo "正在调用 Vercel 官方 Edge Cache REST API 清空生产环境边缘 CDN 缓存..."
+            echo "正在调用 Vercel 官方 Edge Cache REST API 按标签清理生产环境边缘 CDN 缓存..."
             TEAM_QUERY=""
             if [ -n "$VERCEL_ORG_ID" ]; then
               TEAM_QUERY="&teamId=${VERCEL_ORG_ID}"
@@ -346,7 +354,7 @@ jobs:
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
               echo "✅ Vercel 官方 Edge Cache API 成功清除生产环境全球 CDN 页面缓存！"
             else
-              echo "⚠️ Vercel Edge Cache API 返回非 2xx: $HTTP_CODE (请核对 VERCEL_TOKEN 与 VERCEL_PROJECT_ID)"
+              echo "::warning::Vercel Edge Cache API 返回非 2xx: $HTTP_CODE (请核对 VERCEL_TOKEN 与 VERCEL_PROJECT_ID)"
             fi
           elif [ -n "$VERCEL_HOOK" ]; then
             echo "正在触发 Vercel Deploy Hook..."
@@ -358,7 +366,7 @@ jobs:
             if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
               echo "✅ Vercel 重新构建已成功触发，边缘 CDN 将在几秒内全量刷新！"
             else
-              echo "⚠️ Vercel Deploy Hook 请求返回非 2xx 状态码: $HTTP_CODE"
+              echo "::warning::Vercel Deploy Hook 请求返回非 2xx 状态码: $HTTP_CODE"
             fi
           else
             echo "ℹ️ 未配置 VERCEL_TOKEN / VERCEL_PROJECT_ID 或 VERCEL_DEPLOY_HOOK_URL，跳过 Vercel CDN 清理。"
@@ -384,8 +392,8 @@ jobs:
 
           echo "🚀 开始预热核心页面边缘 CDN (HTTP GET)..."
           
-          # 核心页面列表
-          PAGES=("/" "/archive" "/links" "/about" "/sitemap.xml")
+          # 核心页面列表（与精准清除的聚合页及订阅源 URL 完全对齐）
+          PAGES=("/" "/archive" "/links" "/about" "/sitemap.xml" "/rss.xml" "/atom.xml")
           
           for path in "${PAGES[@]}"; do
             URL="${TARGET_ORIGIN}${path}"

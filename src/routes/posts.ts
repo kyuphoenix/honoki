@@ -161,7 +161,7 @@ posts.post('/purge', async (c) => {
     getAboutContent(c.env),
   ])
 
-  // 3. 构建受影响页面的精准 URL 列表（保护全站长效静态图片 /images/* 不被清空）
+  // 3. 构建受影响页面的精准 URL 列表与 Cache-Tag 列表（保护全站长效静态图片 /images/* 不被清空）
   const blogOrigin = c.env.BLOG_URL
     ? (c.env.BLOG_URL.startsWith('http') ? c.env.BLOG_URL : `https://${c.env.BLOG_URL}`).replace(/\/$/, '')
     : new URL(c.req.url).origin
@@ -176,16 +176,28 @@ posts.post('/purge', async (c) => {
     `${blogOrigin}/atom.xml`,
   ]
 
-  // 追加最新变动的文章详情页 URL（最多 10 篇）
+  const affectedTags: string[] = [
+    'page',
+    'home',
+    'archive',
+    'links',
+    'about',
+    'posts',
+    'all-posts',
+  ]
+
+  // 追加最新变动的文章详情页 URL 与标签（最多 10 篇）
   if (Array.isArray(manifest)) {
     for (const p of manifest.slice(0, 10)) {
       if (p.title) {
-        affectedUrls.push(`${blogOrigin}/posts/${encodeURIComponent(p.title)}`)
+        const encodedTitle = encodeURIComponent(p.title)
+        affectedUrls.push(`${blogOrigin}/posts/${encodedTitle}`)
+        affectedTags.push(`post-${encodedTitle}`)
       }
     }
   }
 
-  // 如果请求传入了指定 urls，合并去重
+  // 如果请求传入了指定 urls 或 tags，合并去重
   if (reqBody?.urls && Array.isArray(reqBody.urls)) {
     for (const u of reqBody.urls) {
       if (typeof u === 'string' && !affectedUrls.includes(u)) {
@@ -193,11 +205,19 @@ posts.post('/purge', async (c) => {
       }
     }
   }
+  if (reqBody?.tags && Array.isArray(reqBody.tags)) {
+    for (const t of reqBody.tags) {
+      if (typeof t === 'string' && !affectedTags.includes(t)) {
+        affectedTags.push(t)
+      }
+    }
+  }
 
-  // 4. 调用云厂商官方 CDN Control Plane 清除边缘缓存 (优先精准 URL，显式要求才全量)
+  // 4. 调用云厂商官方 CDN Control Plane 清除边缘缓存 (Cloudflare 按精准 URL，Netlify/Vercel 按精准 Tag，显式要求才全量)
   const isPurgeEverything = reqBody?.purgeEverything === true
   const platformPurges = await purgePlatformCaches(c.env, {
     urls: affectedUrls,
+    tags: affectedTags,
     purgeEverything: isPurgeEverything,
   })
 
@@ -210,6 +230,7 @@ posts.post('/purge', async (c) => {
       siteTitle: siteConfig.title,
       aboutTitle: aboutData.title,
       affectedUrlsCount: affectedUrls.length,
+      affectedTagsCount: affectedTags.length,
       platformPurges,
     },
     'Cache purged and manifest, friends, config & about re-cached successfully'

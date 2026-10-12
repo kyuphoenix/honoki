@@ -176,7 +176,9 @@ export class UmamiDatabaseClient implements DatabaseClient {
           lastGoodSnapshotMap.set(this.websiteId, cached)
           return cached
         }
-      } catch {}
+      } catch (err: any) {
+        console.warn(`[Cache] 读取 Umami 统计缓存 (${cacheKey}) 异常:`, err?.message || err)
+      }
     }
 
     // 3. 向 Umami 接口发起拉取（带严格 2s 超时控制）
@@ -259,7 +261,9 @@ export class UmamiDatabaseClient implements DatabaseClient {
         if (this.storage) {
           try {
             await this.storage.setItem(cacheKey, result, { ttl: KV_CACHE_TTL_S })
-          } catch {}
+          } catch (err: any) {
+            console.warn(`[Cache] 写入 Umami 统计缓存 (${cacheKey}) 异常:`, err?.message || err)
+          }
         }
 
         return result
