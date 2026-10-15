@@ -1,52 +1,48 @@
-# 静态媒体资源（背景图、头像、文章插图）- 浏览器缓存 30 天，边缘 CDN 缓存 1 年，7 天 SWR
+# 静态资源缓存策略。
+# 注意:规则是「叠加」而非覆盖语义,因此各规则路径必须互不重叠,
+# 否则同一资源会命中多条规则,产生重复响应头与非法值(例如 "Access-Control-Allow-Origin: *, *")。
+# 边缘 TTL 用 Cloudflare-CDN-Cache-Control 表达(优先级最高且下发前被剥离),
+# 且一律使用 max-age —— s-maxage / must-revalidate / proxy-revalidate 会禁用 stale-while-revalidate。
+
+# 媒体图片(背景图、头像、文章插图)
+# 浏览器 30 天,边缘 1 年,7 天 SWR
 /images/*
   Access-Control-Allow-Origin: *
-  Cache-Control: public, max-age=2592000, s-maxage=31536000, stale-while-revalidate=604800
-  CDN-Cache-Control: public, max-age=31536000
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
+  Cache-Control: public, max-age=2592000
+  Cloudflare-CDN-Cache-Control: public, max-age=31536000, stale-while-revalidate=604800
 
-# 站点图标与 Manifest（favicon.ico, favicon.svg, PNG 图标等）- 浏览器缓存 30 天，边缘 CDN 缓存 1 年
+# 站点图标与 Manifest
+# 浏览器 30 天,边缘 1 年,1 天 SWR
+# (/favicon* 已覆盖 favicon.ico、favicon.svg、favicon-96x96.png)
 /favicon*
   Access-Control-Allow-Origin: *
-  Cache-Control: public, max-age=2592000, s-maxage=31536000, stale-while-revalidate=86400
-  CDN-Cache-Control: public, max-age=31536000
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
+  Cache-Control: public, max-age=2592000
+  Cloudflare-CDN-Cache-Control: public, max-age=31536000, stale-while-revalidate=86400
 
-/*.ico
+/apple-touch-icon.png
   Access-Control-Allow-Origin: *
-  Cache-Control: public, max-age=2592000, s-maxage=31536000, stale-while-revalidate=86400
-  CDN-Cache-Control: public, max-age=31536000
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
+  Cache-Control: public, max-age=2592000
+  Cloudflare-CDN-Cache-Control: public, max-age=31536000, stale-while-revalidate=86400
 
-/*.svg
+/web-app-manifest-192x192.png
   Access-Control-Allow-Origin: *
-  Cache-Control: public, max-age=2592000, s-maxage=31536000, stale-while-revalidate=86400
-  CDN-Cache-Control: public, max-age=31536000
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
+  Cache-Control: public, max-age=2592000
+  Cloudflare-CDN-Cache-Control: public, max-age=31536000, stale-while-revalidate=86400
 
-/*.png
+/web-app-manifest-512x512.png
   Access-Control-Allow-Origin: *
-  Cache-Control: public, max-age=2592000, s-maxage=31536000, stale-while-revalidate=86400
-  CDN-Cache-Control: public, max-age=31536000
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
-
-/*.webp
-  Access-Control-Allow-Origin: *
-  Cache-Control: public, max-age=2592000, s-maxage=31536000, stale-while-revalidate=604800
-  CDN-Cache-Control: public, max-age=31536000
-  Cloudflare-CDN-Cache-Control: public, max-age=31536000
+  Cache-Control: public, max-age=2592000
+  Cloudflare-CDN-Cache-Control: public, max-age=31536000, stale-while-revalidate=86400
 
 # 样式表与脚本资源
 /css/*
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Methods: GET, HEAD, OPTIONS
-  Cache-Control: public, max-age=604800, s-maxage=2592000, stale-while-revalidate=86400
-  CDN-Cache-Control: public, max-age=2592000
-  Cloudflare-CDN-Cache-Control: public, max-age=2592000
+  Cache-Control: public, max-age=604800
+  Cloudflare-CDN-Cache-Control: public, max-age=2592000, stale-while-revalidate=86400
 
 /js/*
   Access-Control-Allow-Origin: *
   Access-Control-Allow-Methods: GET, HEAD, OPTIONS
-  Cache-Control: public, max-age=604800, s-maxage=2592000, stale-while-revalidate=86400
-  CDN-Cache-Control: public, max-age=2592000
-  Cloudflare-CDN-Cache-Control: public, max-age=2592000
+  Cache-Control: public, max-age=604800
+  Cloudflare-CDN-Cache-Control: public, max-age=2592000, stale-while-revalidate=86400

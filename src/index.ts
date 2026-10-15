@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import type { Context } from 'hono'
 import { cors } from 'hono/cors'
 import { logger } from 'hono/logger'
 import { AppEnv } from './types/env.js'
@@ -10,22 +11,44 @@ import archivePage from './pages/archive.js'
 import aboutPage from './pages/about.js'
 import linksPage from './pages/links.js'
 import { getManifest, getBlogConfig } from './services/github.js'
-import { giscusLightCss, giscusDarkCss } from './styles/giscusTheme.js'
 import { tailwindCss, tailwindVersion } from './styles/tailwindBundle.js'
 import { swupClientJs, swupClientVersion } from './scripts/swupBundle.js'
-import { sitemapXsl } from './styles/sitemapXsl.js'
 import { setTieredCache } from './utils/cache.js'
 import { i18n, I18nKey, getHtmlLang } from './i18n/index.js'
 
 const app = new Hono<AppEnv>()
 
 // 全局中间件
-app.use('*', logger())
+// 全局中间件:生产环境关闭逐请求日志(避免每请求开销与日志噪声),本地开发保留
+const isProduction = (env?: AppEnv['Bindings']) =>
+  env?.ENVIRONMENT === 'production' || (typeof process !== 'undefined' && process.env?.NODE_ENV === 'production')
 
-// 多平台环境兼容适配中间件：确保在 Vercel / Node.js 环境下 process.env 能无缝透传到 c.env
+app.use('*', async (c, next) => {
+  if (isProduction(c.env)) {
+    await next()
+    return
+  }
+  return logger()(c, next)
+})
+
+// 安全响应头(对所有响应生效,包括 Worker 生成的 HTML —— public/_headers 对 Worker 响应无效)
+app.use('*', async (c, next) => {
+  await next()
+  const headers = c.res.headers
+  if (!headers.has('X-Content-Type-Options')) headers.set('X-Content-Type-Options', 'nosniff')
+  if (!headers.has('Referrer-Policy')) headers.set('Referrer-Policy', 'strict-origin-when-cross-origin')
+  if (!headers.has('X-Frame-Options')) headers.set('X-Frame-Options', 'SAMEORIGIN')
+  // HSTS 仅在 HTTPS 请求上设置(本地 http 下设置无意义且会被浏览器忽略)
+  if (new URL(c.req.url).protocol === 'https:' && !headers.has('Strict-Transport-Security')) {
+    headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains')
+  }
+})
+
+// 多平台环境兼容适配中间件:确保在 Vercel / Node.js 环境下 process.env 能无缝透传到 c.env
 app.use('*', async (c, next) => {
   if (typeof process !== 'undefined' && process.env) {
-    c.env = { ...process.env, ...(c.env || {}) } as any
+    // 原地合并,避免每个请求都新建一个大对象
+    c.env = Object.assign({}, process.env, c.env || {}) as any
   }
   await next()
 })
@@ -45,29 +68,12 @@ app.use('*', async (c, next) => {
   }
 })
 
-// Giscus 自定义主题样式路由（附带 CORS 响应头，确保 giscus.app iframe 可以跨域加载）
-app.get('/css/giscus-fuwari-light.css', (c) => {
-  return c.text(giscusLightCss, 200, {
-    'Content-Type': 'text/css; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'public, max-age=60',
-  })
-})
-
-app.get('/css/giscus-fuwari-dark.css', (c) => {
-  return c.text(giscusDarkCss, 200, {
-    'Content-Type': 'text/css; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'public, max-age=60',
-  })
-})
-
 // 生产级静态 Tailwind CSS 样式表路由
 app.get('/css/tailwind.css', (c) => {
   const version = c.req.query('v')
   const cacheControl = version
     ? 'public, max-age=31536000, immutable'
-    : 'public, max-age=0, s-maxage=86400, stale-while-revalidate=604800, must-revalidate'
+    : 'public, max-age=0, stale-while-revalidate=604800'
 
   return c.text(tailwindCss, 200, {
     'Content-Type': 'text/css; charset=utf-8',
@@ -82,22 +88,13 @@ app.get('/js/swup.js', (c) => {
   const version = c.req.query('v')
   const cacheControl = version
     ? 'public, max-age=31536000, immutable'
-    : 'public, max-age=0, s-maxage=86400, stale-while-revalidate=604800, must-revalidate'
+    : 'public, max-age=0, stale-while-revalidate=604800'
 
   return c.body(swupClientJs, 200, {
     'Content-Type': 'application/javascript; charset=utf-8',
     'Access-Control-Allow-Origin': '*',
     'Cache-Control': cacheControl,
     'ETag': `"${swupClientVersion}"`,
-  })
-})
-
-// Sitemap.xml 可视化 XSL 样式表
-app.get('/sitemap.xsl', (c) => {
-  return c.text(sitemapXsl, 200, {
-    'Content-Type': 'application/xml; charset=utf-8',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'public, max-age=86400, s-maxage=86400',
   })
 })
 
@@ -122,6 +119,23 @@ function getMimeType(filename: string): string {
     default:
       return 'application/octet-stream'
   }
+}
+
+/**
+ * 规范化站点根地址:优先使用 BLOG_URL,缺失或缺少协议时回退到当前请求的 origin。
+ * 避免 BLOG_URL 未带协议时在 RSS / sitemap / robots 中生成非法 URL。
+ */
+function resolveBaseUrl(c: Context): string {
+  const raw = (c.env.BLOG_URL || '').trim()
+  if (raw) {
+    const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`
+    try {
+      return new URL(withProto).origin
+    } catch {
+      // BLOG_URL 非法时回退到请求 origin
+    }
+  }
+  return new URL(c.req.url).origin
 }
 
 // 媒体图片动态边缘代理与缓存路由（支持 Pages CMS 上传新图片后无需重新部署 Worker 即可全球 CDN 加速访问）
@@ -240,6 +254,14 @@ app.get('/favicon.ico', async (c) => {
 // API 路由 (带 CORS)
 const api = new Hono<AppEnv>()
 api.use('*', cors())
+// 默认禁止缓存 API 响应,避免 Workers Cache 对无 Cache-Control 的响应做启发式缓存
+// (各具体接口如需缓存仍可自行 c.header 覆盖)。purge/写接口尤为敏感。
+api.use('*', async (c, next) => {
+  await next()
+  if (!c.res.headers.has('Cache-Control')) {
+    c.res.headers.set('Cache-Control', 'no-store')
+  }
+})
 api.route('/posts', postRoutes)
 api.route('/stats', statsRoutes)
 app.route('/api', api)
@@ -253,19 +275,19 @@ app.get('/rss.xml', async (c) => {
   const manifest = manifestRaw.filter(
     (p) => p.draft !== true && (p.draft as any) !== 'true'
   )
-  const baseUrl = (c.env.BLOG_URL || '').replace(/\/$/, '') || new URL(c.req.url).origin
+  const baseUrl = resolveBaseUrl(c)
 
   const items = manifest
     .slice(0, 20)
     .map(
       (post) => `
     <item>
-      <title><![CDATA[${post.title}]]></title>
+      <title><![CDATA[${escapeCdata(post.title)}]]></title>
       <link>${baseUrl}/posts/${encodeURIComponent(post.title)}</link>
       <guid isPermaLink="true">${baseUrl}/posts/${encodeURIComponent(post.title)}</guid>
       <pubDate>${new Date(post.date).toUTCString()}</pubDate>
-      <description><![CDATA[${post.excerpt || post.title}]]></description>
-      <category>${post.category}</category>
+      <description><![CDATA[${escapeCdata(post.excerpt || post.title)}]]></description>
+      <category><![CDATA[${escapeCdata(post.category)}]]></category>
     </item>`
     )
     .join('')
@@ -273,9 +295,9 @@ app.get('/rss.xml', async (c) => {
   const rss = `<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
   <channel>
-    <title><![CDATA[${siteConfig.title}]]></title>
+    <title><![CDATA[${escapeCdata(siteConfig.title)}]]></title>
     <link>${baseUrl}</link>
-    <description><![CDATA[${siteConfig.description}]]></description>
+    <description><![CDATA[${escapeCdata(siteConfig.description)}]]></description>
     <atom:link href="${baseUrl}/rss.xml" rel="self" type="application/rss+xml"/>
     ${items}
   </channel>
@@ -306,12 +328,20 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;')
 }
 
+/**
+ * 转义 CDATA 段内容:仅需处理 "]]>" 终止符,否则会提前闭合 CDATA 破坏 XML。
+ */
+function escapeCdata(str: string): string {
+  if (!str) return ''
+  return str.replace(/\]\]>/g, ']]]]><![CDATA[>')
+}
+
 // Sitemap.xml 站点地图生成 (支持 Google, Bing, 百度等全搜索引擎收录标准)
 app.get('/sitemap.xml', async (c) => {
   const manifest = (await getManifest(c.env)).filter(
     (p) => p.draft !== true && (p.draft as any) !== 'true'
   )
-  const baseUrl = (c.env.BLOG_URL || '').replace(/\/$/, '') || new URL(c.req.url).origin
+  const baseUrl = resolveBaseUrl(c)
 
   // 1. 固定页面配置（首页、友链）
   const staticPages = [
@@ -333,8 +363,8 @@ app.get('/sitemap.xml', async (c) => {
       const coverUrl = post.cover.startsWith('http')
         ? post.cover
         : `${baseUrl}${post.cover.startsWith('/') ? '' : '/'}${post.cover}`
-      const safeTitle = (post.title || '').replace(/\]\]>/g, ']]&gt;')
-      const safeCaption = (post.excerpt || post.title || '').replace(/\]\]>/g, ']]&gt;')
+      const safeTitle = escapeCdata(post.title || '')
+      const safeCaption = escapeCdata(post.excerpt || post.title || '')
       imageXml = `\n    <image:image>
       <image:loc>${escapeXml(coverUrl)}</image:loc>
       <image:title><![CDATA[${safeTitle}]]></image:title>
@@ -374,7 +404,7 @@ ${articlePages.join('\n')}
 
 // robots.txt 搜索引擎爬虫协议 (告知抓取范围与 Sitemap 路径)
 app.get('/robots.txt', (c) => {
-  const baseUrl = (c.env.BLOG_URL || '').replace(/\/$/, '') || new URL(c.req.url).origin
+  const baseUrl = resolveBaseUrl(c)
   const robotsTxt = `User-agent: *
 Allow: /
 Disallow: /api/

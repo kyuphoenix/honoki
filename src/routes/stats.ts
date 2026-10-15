@@ -127,21 +127,13 @@ stats.get('/post', async (c) => {
 stats.get('/status', (c) => {
   const type = resolveDatabaseType(c.env)
   const enabled = isStatsEnabled(c.env)
+  // 仅暴露非敏感状态,不返回 websiteId / hasApiKey 等配置细节
   return c.json({
     success: true,
     data: {
       provider: type || 'none',
-      database: type || 'none',
       configured: Boolean(type),
       enabled,
-      ...(type === 'umami'
-        ? {
-            umamiHost: c.env.UMAMI_HOST || c.env.UMAMI_URL || 'https://cloud.umami.is',
-            websiteId: c.env.UMAMI_WEBSITE_ID || c.env.UMAMI_ID || '',
-            hasApiKey: Boolean(c.env.UMAMI_API_KEY || c.env.UMAMI_TOKEN),
-            scriptEnabled: c.env.ENABLE_UMAMI_SCRIPT !== 'false' && c.env.ENABLE_UMAMI_SCRIPT !== false,
-          }
-        : {}),
     },
   })
 })

@@ -11,7 +11,7 @@
     "build:js": "node scripts/build-client.mjs",
     "build:client": "node scripts/build-client.mjs && node scripts/build-css.mjs",
     "build": "node scripts/build-vercel.mjs",
-    "deploy": "wrangler deploy --minify",
+    "deploy": "pnpm build:client && wrangler deploy --minify",
     "gen:manifest": "node scripts/gen-manifest.mjs",
     "prepare:wrangler": "node scripts/prepare-wrangler.mjs",
     "sync:cf-secrets": "node scripts/sync-cloudflare-secrets.mjs",

@@ -53,11 +53,13 @@ const CONFIG_CACHE_KEY = 'site_config'
 const ABOUT_CACHE_KEY = 'page:about'
 
 /**
- * 构建 GitHub Raw 内容 URL (附加时间戳以绕过 Fastly/GitHub Raw 边缘 5 分钟死缓存)
+ * 构建 GitHub Raw 内容 URL。
+ * 不加时间戳:内容更新由 /api/posts/purge 主动失效 KV 缓存,
+ * 保留 GitHub 的 CDN 缓存可以显著降低冷启动时的回源延迟。
  */
 function rawUrl(owner: string, repo: string, branch: string, path: string): string {
   const safeBranch = branch && branch.trim() ? branch.trim() : 'main'
-  return `https://raw.githubusercontent.com/${owner}/${repo}/${safeBranch}/${encodeURI(path)}?_t=${Date.now()}`
+  return `https://raw.githubusercontent.com/${owner}/${repo}/${safeBranch}/${encodeURI(path)}`
 }
 
 /**
@@ -85,17 +87,17 @@ function isGitHubConfigured(env: AppEnv['Bindings']): boolean {
 }
 
 /**
- * 从 GitHub 拉取文件内容（带超时与异常熔断保护，默认 2500ms 超时，防止因网络受阻导致页面卡死）
+ * 从 GitHub 拉取文件内容(带超时与异常熔断保护)。
+ * 默认 5000ms:2500ms 对跨洋链路偏紧,超时会静默降级为内置占位内容。
+ * 不发送 no-cache,保留 GitHub/Fastly 的 CDN 缓存以降低回源延迟。
  */
 async function fetchFromGitHub(
   url: string,
   token?: string,
-  timeoutMs = 2500
+  timeoutMs = 5000
 ): Promise<string | null> {
   const headers: Record<string, string> = {
     'User-Agent': 'Blog-Worker',
-    'Cache-Control': 'no-cache, no-store',
-    Pragma: 'no-cache',
   }
   if (token) {
     headers['Authorization'] = `token ${token}`

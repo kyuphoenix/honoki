@@ -44,6 +44,9 @@ export type Bindings = {
   ENABLE_UMAMI_SCRIPT?: string | boolean
   ENABLE_STATS?: string | boolean
   DISABLE_STATS?: string | boolean
+  // 运行环境标记(production 时关闭逐请求日志)
+  ENVIRONMENT?: string
+  NODE_ENV?: string
   // 运行与部署平台标记 (cloudflare | vercel | netlify)
   DEPLOY_PLATFORM?: 'cloudflare' | 'vercel' | 'netlify' | string
   // 边缘 CDN 强制缓存失效与 SWR 配置 (Cloudflare / Netlify / Vercel)

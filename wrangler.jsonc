@@ -3,8 +3,14 @@
   "main": "src/index.ts",
   "compatibility_date": "2024-11-01",
   "compatibility_flags": ["nodejs_compat"],
-  // Cloudflare 边缘 CDN 缓存由响应头 (Cloudflare-CDN-Cache-Control / CDN-Cache-Control)
-  // 及自定义域名的 Cache Rules 驱动，Wrangler 配置本身无需 cache 顶层字段。
+  // 启用 Cloudflare Workers Cache(Wrangler >= 4.69 支持)。
+  // 启用后每个 HTTP 请求都会先查边缘缓存,是否缓存/缓存多久完全由 Worker 输出的
+  // Cache-Control(及 Cloudflare-CDN-Cache-Control)决定;SSR 的 HTML/JSON/RSS 因此才真正
+  // 进入边缘缓存(默认 DYNAMIC,不缓存)。失效由 ctx.cache.purge()(见 /api/posts/purge)负责,
+  // 注意 zone 级 purge_cache API 不影响 Workers Cache。
+  "cache": {
+    "enabled": true
+  },
   // 静态资源目录（托管 /images/home-bg.webp, /images/avatar.webp, favicon 等）
   "assets": {
     "directory": "./public"

@@ -60,13 +60,17 @@ export function detectPlatform(c?: Context): DeployPlatform {
 /**
  * 设置多平台分层缓存与 SWR (Stale-While-Revalidate) 响应头
  *
- * 分层策略：
- * 1. 客户端浏览器 (Browser)：默认 max-age=0, must-revalidate
- *    - 确保用户刷新或导航时总是向边缘 CDN 验证，CDN 缓存失效后用户能即时看到最新内容，避免被本地磁盘死缓存拦截。
- * 2. 边缘 CDN (Edge CDN)：
- *    - s-maxage: 支持由调用方传入差异化 TTL (聚合列表页 30 分钟，文章详情页 24 小时)。
- *    - stale-while-revalidate (SWR): 聚合页 1 天，文章页 7 天。
- *    - 平台严格隔离：根据部署平台自动按需输出对应标头，Cloudflare 部署绝不输出 Netlify / Vercel 专属私有头。
+ * 分层策略(Cloudflare Workers Cache 语义):
+ * 1. 浏览器层:仅用 Cache-Control 的 max-age 控制。默认 0 表示每次使用前都必须回边缘校验,
+ *    保证 CDN 失效后用户能立即看到最新内容,同时避免本地磁盘死缓存。
+ * 2. 边缘 CDN 层:用平台专属头(CF 为 Cloudflare-CDN-Cache-Control,下发客户端前会被剥离)
+ *    承载较长的边缘 TTL 与 SWR,使浏览器 TTL 与边缘 TTL 解耦。
+ *
+ * 关键约束(否则 SWR 会静默失效):s-maxage / must-revalidate / proxy-revalidate
+ * 三者中任意一个出现都会禁用 stale-while-revalidate(RFC 9111 §4.2.4),因此边缘 TTL
+ * 一律使用 max-age 表达,且不输出 must-revalidate。
+ *
+ * 平台严格隔离:根据部署平台自动按需输出对应标头,Cloudflare 部署绝不输出 Netlify / Vercel 专属私有头。
  */
 export function setTieredCache(c: Context, options: CacheOptions = {}) {
   const browserMaxAge = options.browserMaxAge ?? 0
@@ -76,26 +80,27 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
 
   const platform = detectPlatform(c)
 
-  // 1. 标准 HTTP 缓存头 (通用浏览器与所有边缘 CDN 遵循的标准规范)
-  c.header(
-    'Cache-Control',
-    `public, max-age=${browserMaxAge}, s-maxage=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}, must-revalidate`
-  )
+  // 1. 浏览器缓存:只用 max-age。max-age=0 即"每次使用前必须回边缘校验"。
+  c.header('Cache-Control', `public, max-age=${browserMaxAge}`)
 
-  // 2. 根据部署运行的宿主平台，按需输出对应平台的专属边缘控制头与标签，彻底隔离其他平台的标头
+  // 2. 边缘 CDN 缓存:输出平台专属控制头(边缘 TTL 与 SWR 用 max-age 表达,避免禁用 SWR)
   if (platform === 'cloudflare') {
-    // Cloudflare 专属：优先级高于标准 Cache-Control，指示 CF 边缘节点强缓存与 SWR
-    // 注：Cloudflare 非企业版不支持通过 Cache-Tag 头清除，故仅输出边缘 TTL 控制头
-    c.header(
-      'Cloudflare-CDN-Cache-Control',
-      `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
+    // Cloudflare Workers Cache 以 Cloudflare-CDN-Cache-Control 为最高优先级指令,
+    // 且在返回客户端前剥离该头;启用 wrangler 的 cache.enabled 后,边缘据此缓存与 SWR。
+    const edgeDirective = `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
+    c.header('Cloudflare-CDN-Cache-Control', edgeDirective)
+    c.header('CDN-Cache-Control', edgeDirective)
+
+    // Cache-Tag:供 ctx.cache.purge({ tags }) 精准失效。CF 消费后剥离,不下发客户端。
+    // 标签必须是可打印 ASCII(0x21-0x7E)且 <=1024 字符,否则会被静默丢弃。
+    const safeTags = tags.filter(
+      (t) => typeof t === 'string' && t.length > 0 && t.length <= 1024 && /^[\x21-\x7E]+$/.test(t)
     )
-    c.header(
-      'CDN-Cache-Control',
-      `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
-    )
+    if (safeTags.length > 0) {
+      c.header('Cache-Tag', safeTags.join(','))
+    }
   } else if (platform === 'netlify') {
-    // Netlify 专属：Netlify 边缘节点 CDN 控制头与细粒度标签
+    // Netlify 专属:Netlify 边缘节点 CDN 控制头与细粒度标签
     c.header(
       'Netlify-CDN-Cache-Control',
       `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
@@ -104,7 +109,7 @@ export function setTieredCache(c: Context, options: CacheOptions = {}) {
       c.header('Netlify-Cache-Tag', tags.join(','))
     }
   } else {
-    // Vercel 专属：标准 CDN 标头与 Vercel Edge Cache 精准 Purge 标签
+    // Vercel 专属:标准 CDN 标头与 Vercel Edge Cache 精准 Purge 标签
     c.header(
       'CDN-Cache-Control',
       `public, max-age=${edgeMaxAge}, stale-while-revalidate=${swrMaxAge}`
@@ -122,6 +127,90 @@ export function setNoCache(c: Context) {
   c.header('Cache-Control', 'private, no-cache, no-store, must-revalidate')
   c.header('Pragma', 'no-cache')
   c.header('Expires', '0')
+}
+
+export interface PurgeWorkersCacheResult {
+  attempted: boolean
+  success: boolean
+  message: string
+}
+
+/**
+ * 清除 Cloudflare Workers Cache(即 wrangler `cache.enabled: true` 启用的那层缓存)。
+ *
+ * 重要:zone 级 purge_cache API(见 purgePlatformCaches)对 Workers Cache **无效**,
+ * 必须通过 ctx.cache.purge() / cache.purge() 才能清掉。purge 的作用域是调用它的 entrypoint。
+ *
+ * 优先按 tags 精准失效;若传入 purgeEverything 则清空该 entrypoint 的全部缓存。
+ * 在非 Cloudflare / 无 executionCtx 环境(本地 dev、Vercel、Netlify)安全跳过。
+ */
+export async function purgeWorkersCache(
+  c: Context,
+  options?: { tags?: string[]; purgeEverything?: boolean }
+): Promise<PurgeWorkersCacheResult> {
+  const tags = (options?.tags || []).filter(
+    (t) => typeof t === 'string' && t.length > 0 && t.length <= 1024 && /^[\x21-\x7E]+$/.test(t)
+  )
+
+  let execCtx: any = null
+  try {
+    execCtx = c.executionCtx
+  } catch {
+    // 无 ExecutionContext(本地 dev / 非 Workers 运行时)
+    execCtx = null
+  }
+
+  const cacheCtx = execCtx?.cache
+  if (!cacheCtx || typeof cacheCtx.purge !== 'function') {
+    return {
+      attempted: false,
+      success: false,
+      message: 'Workers Cache 清理跳过: 当前运行时不提供 ctx.cache(非 Cloudflare Workers 或未启用 cache)',
+    }
+  }
+
+  try {
+    const purgeOptions = options?.purgeEverything
+      ? { purgeEverything: true }
+      : tags.length > 0
+        ? { tags }
+        : null
+
+    if (!purgeOptions) {
+      return {
+        attempted: false,
+        success: false,
+        message: 'Workers Cache 清理跳过: 未提供有效的 tags 或 purgeEverything',
+      }
+    }
+
+    const result = await cacheCtx.purge(purgeOptions)
+    if (result?.success) {
+      return {
+        attempted: true,
+        success: true,
+        message: options?.purgeEverything
+          ? 'Workers Cache 已全量清除'
+          : `Workers Cache 已按标签 [${tags.join(', ')}] 精准清除`,
+      }
+    }
+    const errMsg =
+      (result?.errors || [])
+        .map((e: any) => `${e?.code ?? ''} ${e?.message ?? ''}`.trim())
+        .filter(Boolean)
+        .join('; ') || '未知错误'
+    return {
+      attempted: true,
+      success: false,
+      message: `Workers Cache 清除失败: ${errMsg}`,
+    }
+  } catch (err: any) {
+    return {
+      attempted: true,
+      success: false,
+      message: `Workers Cache 清除异常: ${err?.message || err}`,
+    }
+  }
 }
 
 export interface PurgePlatformResult {
@@ -157,7 +246,9 @@ export async function purgePlatformCaches(
   const results: PurgePlatformResult[] = []
 
   // ====================================================
-  // 1. Cloudflare 全局 CDN 缓存清除
+  // 1. Cloudflare zone 级 CDN 缓存清除(仅影响 zone 缓存,例如 /images/* 等静态资源)
+  //    注意:此 API 对 Workers Cache(wrangler cache.enabled 启用那层)**无效**,
+  //    Worker 生成页面的失效请使用 purgeWorkersCache(ctx.cache.purge)。
   // ====================================================
   let cfZoneId = env?.CLOUDFLARE_ZONE_ID || (env as any)?.CF_ZONE_ID
   const cfToken = env?.CLOUDFLARE_API_TOKEN || (env as any)?.CF_API_TOKEN

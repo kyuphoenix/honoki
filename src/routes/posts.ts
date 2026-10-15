@@ -3,9 +3,26 @@ import type { AppEnv } from '../types/env.js'
 import { getManifest, getPost, getFriends, getBlogConfig, getAboutContent, purgeCache } from '../services/github.js'
 import { success, paginated, fail } from '../utils/response.js'
 import { parsePagination } from '../utils/pagination.js'
-import { setTieredCache, setNoCache, purgePlatformCaches } from '../utils/cache.js'
+import { setTieredCache, setNoCache, purgePlatformCaches, purgeWorkersCache } from '../utils/cache.js'
 
 const posts = new Hono<AppEnv>()
+
+/**
+ * 恒定时间字符串比较,防止通过响应时间差推测 PURGE_SECRET。
+ * 长度差异不回退提前返回;使用固定上限长度避免长度侧信道泄漏过多信息。
+ */
+async function timingSafeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder()
+  const aBytes = enc.encode(a)
+  const bBytes = enc.encode(b)
+  // 先比较长度(长度本身不视为敏感),再用 X 位差异做恒定时间比较
+  let diff = aBytes.length ^ bBytes.length
+  const max = Math.max(aBytes.length, bBytes.length)
+  for (let i = 0; i < max; i++) {
+    diff |= (aBytes[i] ?? 0) ^ (bBytes[i] ?? 0)
+  }
+  return diff === 0
+}
 
 /**
  * 获取文章列表
@@ -132,10 +149,15 @@ posts.get('/:title', async (c) => {
 posts.post('/purge', async (c) => {
   setNoCache(c)
 
-  // 密钥验证（支持 PURGE_SECRET 或 GH_TOKEN / PAT_TOKEN）
-  const secret = c.req.header('X-Purge-Secret')
+  // 密钥验证(优先 PURGE_SECRET,兼容 GH_TOKEN / PAT_TOKEN / GITHUB_TOKEN)
+  // 采用 fail-closed:未配置任何密钥时直接拒绝,避免匿名清空缓存(缓存抖动/回源放大)。
+  const secret = c.req.header('X-Purge-Secret') || ''
   const expectedSecret = c.env.PURGE_SECRET || c.env.GH_TOKEN || c.env.PAT_TOKEN || c.env.GITHUB_TOKEN
-  if (expectedSecret && secret !== expectedSecret) {
+  if (!expectedSecret) {
+    console.error('[Purge] 拒绝请求:未配置 PURGE_SECRET(或 GH_TOKEN/PAT_TOKEN/GITHUB_TOKEN)')
+    return fail(c, 'Purge endpoint disabled: no secret configured', 403)
+  }
+  if (!(await timingSafeEqual(secret, expectedSecret))) {
     return fail(c, 'Unauthorized', 401)
   }
 
@@ -214,9 +236,17 @@ posts.post('/purge', async (c) => {
       }
     }
   }
-
-  // 4. 调用云厂商官方 CDN Control Plane 清除边缘缓存 (Cloudflare 按精准 URL，Netlify/Vercel 按精准 Tag，显式要求才全量)
+  // 4. 清除边缘缓存:Workers Cache(Worker 生成页面)+ 各厂商 zone 级 CDN(静态资源)
   const isPurgeEverything = reqBody?.purgeEverything === true
+
+  // 4a. 清除 Cloudflare Workers Cache(Worker 生成页面所在的那层缓存)。
+  //     zone 级 purge_cache API 对其无效,必须用 ctx.cache.purge()。
+  const workersCachePurge = await purgeWorkersCache(c, {
+    tags: affectedTags,
+    purgeEverything: isPurgeEverything,
+  })
+
+  // 4b. 清除各厂商 zone 级 CDN 缓存(Cloudflare 静态资源 / Netlify / Vercel)
   const platformPurges = await purgePlatformCaches(c.env, {
     urls: affectedUrls,
     tags: affectedTags,
@@ -233,6 +263,7 @@ posts.post('/purge', async (c) => {
       aboutTitle: aboutData.title,
       affectedUrlsCount: affectedUrls.length,
       affectedTagsCount: affectedTags.length,
+      workersCachePurge,
       platformPurges,
     },
     'Cache purged and manifest, friends, config & about re-cached successfully'
